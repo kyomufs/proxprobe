@@ -1,0 +1,31 @@
+# Подписки для proxprobe.
+#
+# Формат здесь не указывается: один и тот же URL отдаёт разные форматы в
+# зависимости от User-Agent, поэтому вид определяется по содержимому.
+#
+# Остальные источники держим закомментированными: их узлы проверяются
+# часами (у pro1link 434 reality-узла, каждый мёртвый стоит полного
+# таймаута), а для отладки конвейера хватает одного списка ссылок.
+sources:
+  - id: goida
+    # 1.txt — 11181 строка (в основном socks5, проверяются часами);
+    # 25.txt — 257 узлов, все vless. Для быстрых прогонов берём 25.txt.
+    url: https://gitlab.com/avencores/goida-vpn-configs/-/raw/main/githubmirror/25.txt
+
+  # - id: pro1link-clash
+  #   url: https://pro1link.ru/fD-0xCC7_W5jdXM_/
+  #   ua: clash-verge/2.0
+  #   insecure: true   # сервер отдаёт неполную цепочку сертификатов
+  #
+  # - id: pro1link-xray
+  #   url: https://pro1link.ru/fD-0xCC7_W5jdXM_/
+  #   ua: v2rayNG/1.9.16
+  #   insecure: true
+  #   headers:
+  #     Accept: application/json
+  #
+  # - id: sunmiao
+  #   url: https://sunmiao4458.github.io/free-proxy-airport/clash.yaml
+  #
+  # - id: proxypool-singbox
+  #   url: https://raw.githubusercontent.com/snakem982/proxypool/main/source/sing-box-2.json

@@ -1,0 +1,622 @@
+[
+ {
+  "inbounds": [
+   {
+    "tag": "socks",
+    "port": 10808,
+    "listen": "127.0.0.1",
+    "protocol": "socks",
+    "settings": {
+     "udp": true,
+     "auth": "noauth"
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   },
+   {
+    "tag": "http",
+    "port": 10809,
+    "listen": "127.0.0.1",
+    "protocol": "http",
+    "settings": {
+     "allowTransparent": false
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   }
+  ],
+  "remarks": "🇷🇺 Авто LTE (Обход БС) ⚡",
+  "outbounds": [
+   {
+    "tag": "pro1-lte-alternative-1",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-nl-028ec01c735f.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-c0b96d449c9ec144.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "firefox"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-2",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-nl-acd4de73f563.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-3548ed3b14483468.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "firefox"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-3",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-nl-a4d20a05ef80.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-1a76dc8dbc8b9b53.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "firefox"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-4",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-nl-30f8b0154e1c.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-bd4453e5a1f7f733.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "firefox"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-5",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "72.56.247.180",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-a4a9500f623c3dfa.myprotechnology.ru",
+      "publicKey": "kfAhn4v4da_xfJp8myv0sWj280otOyTNLI6j_jpIeng",
+      "shortId": "0ac8b547",
+      "fingerprint": "qq"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-6",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "212.193.27.232",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-bb8f0de5f2b19a68.myprotechnology.ru",
+      "publicKey": "kfAhn4v4da_xfJp8myv0sWj280otOyTNLI6j_jpIeng",
+      "shortId": "0ac8b547",
+      "fingerprint": "qq"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-alternative-7",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "138.16.179.177",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-02dd93c53c4a9bf7.myprotechnology.ru",
+      "publicKey": "kfAhn4v4da_xfJp8myv0sWj280otOyTNLI6j_jpIeng",
+      "shortId": "0ac8b547",
+      "fingerprint": "qq"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-primary-1",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "liftpult.pro",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": ""
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "ws",
+     "wsSettings": {
+      "path": "/cart/sync/BkPKwEAbzQJk",
+      "headers": {
+       "Host": "liftpult.pro"
+      }
+     },
+     "security": "tls",
+     "tlsSettings": {
+      "serverName": "liftpult.pro",
+      "fingerprint": "edge",
+      "alpn": [
+       "http/1.1"
+      ]
+     },
+     "sockopt": {
+      "tcpKeepAliveIdle": 30,
+      "tcpKeepAliveInterval": 15,
+      "tcpNoDelay": true
+     }
+    },
+    "mux": {
+     "enabled": true,
+     "concurrency": 1,
+     "xudpConcurrency": 16,
+     "xudpProxyUDP443": "reject"
+    }
+   },
+   {
+    "tag": "fragment",
+    "protocol": "freedom",
+    "settings": {
+     "noises": [
+      {
+       "type": "rand",
+       "delay": "10-16",
+       "packet": "10-20"
+      }
+     ],
+     "fragment": {
+      "length": "50-100",
+      "packets": "tlshello",
+      "interval": "5"
+     }
+    }
+   },
+   {
+    "tag": "direct",
+    "protocol": "freedom"
+   },
+   {
+    "tag": "block",
+    "protocol": "blackhole"
+   },
+   {
+    "tag": "pro1-lte-primary-2",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-bridge03.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-ae60127289600263.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "qq"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-primary-3",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "ru-bridge05.myprotechnology.ru",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": "xtls-rprx-vision"
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "edge-dafc46de6da897a3.myprotechnology.ru",
+      "publicKey": "KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g",
+      "shortId": "831b67ef346812ed",
+      "fingerprint": "qq"
+     }
+    }
+   },
+   {
+    "tag": "pro1-lte-fallback",
+    "protocol": "loopback",
+    "settings": {
+     "inboundTag": "pro1-lte-fallback-in"
+    }
+   }
+  ],
+  "burstObservatory": {
+   "subjectSelector": [
+    "pro1-lte-primary-",
+    "pro1-lte-alternative-"
+   ],
+   "pingConfig": {
+    "destination": "https://www.cloudflare.com/cdn-cgi/trace",
+    "interval": "30s",
+    "timeout": "2s",
+    "sampling": 3,
+    "connectivity": ""
+   }
+  },
+  "stats": {}
+ },
+ {
+  "inbounds": [
+   {
+    "tag": "socks",
+    "port": 10808,
+    "listen": "127.0.0.1",
+    "protocol": "socks",
+    "settings": {
+     "udp": true,
+     "auth": "noauth"
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   },
+   {
+    "tag": "http",
+    "port": 10809,
+    "listen": "127.0.0.1",
+    "protocol": "http",
+    "settings": {
+     "allowTransparent": false
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   }
+  ],
+  "outbounds": [
+   {
+    "tag": "proxy",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "tyctyvsjec.localto.net",
+       "port": 443,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": ""
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "tyctyvsjec.localto.net",
+      "publicKey": "tei5wyEWqA4cWDUe-gRJkAiOYiA7FQAZ30p6sapdDmA",
+      "shortId": "35a485128f35f588",
+      "fingerprint": "qq"
+     }
+    },
+    "mux": {
+     "enabled": true,
+     "concurrency": 1,
+     "xudpConcurrency": 16,
+     "xudpProxyUDP443": "allow"
+    }
+   },
+   {
+    "tag": "fragment",
+    "protocol": "freedom",
+    "settings": {
+     "noises": [
+      {
+       "type": "rand",
+       "delay": "10-16",
+       "packet": "10-20"
+      }
+     ],
+     "fragment": {
+      "length": "50-100",
+      "packets": "tlshello",
+      "interval": "5"
+     }
+    }
+   },
+   {
+    "tag": "direct",
+    "protocol": "freedom"
+   },
+   {
+    "tag": "block",
+    "protocol": "blackhole"
+   }
+  ],
+  "remarks": "🇳🇱 Нидерланды TURBO TUN 1"
+ },
+ {
+  "inbounds": [
+   {
+    "tag": "socks",
+    "port": 10808,
+    "listen": "127.0.0.1",
+    "protocol": "socks",
+    "settings": {
+     "udp": true,
+     "auth": "noauth"
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   },
+   {
+    "tag": "http",
+    "port": 10809,
+    "listen": "127.0.0.1",
+    "protocol": "http",
+    "settings": {
+     "allowTransparent": false
+    },
+    "sniffing": {
+     "enabled": true,
+     "routeOnly": true,
+     "destOverride": [
+      "http",
+      "tls",
+      "quic"
+     ]
+    }
+   }
+  ],
+  "outbounds": [
+   {
+    "tag": "proxy",
+    "protocol": "vless",
+    "settings": {
+     "vnext": [
+      {
+       "address": "tzablmgo5f.localto.net",
+       "port": 2812,
+       "users": [
+        {
+         "id": "b9e20aa5-2065-447b-9c9e-0ec9fe93a687",
+         "encryption": "none",
+         "flow": ""
+        }
+       ]
+      }
+     ]
+    },
+    "streamSettings": {
+     "network": "tcp",
+     "tcpSettings": {},
+     "security": "reality",
+     "realitySettings": {
+      "serverName": "vaplawzcgt.a.pinggy.link",
+      "publicKey": "tei5wyEWqA4cWDUe-gRJkAiOYiA7FQAZ30p6sapdDmA",
+      "shortId": "35a485128f35f588",
+      "fingerprint": "qq"
+     }
+    },
+    "mux": {
+     "enabled": true,
+     "concurrency": 1,
+     "xudpConcurrency": 16,
+     "xudpProxyUDP443": "allow"
+    }
+   },
+   {
+    "tag": "fragment",
+    "protocol": "freedom",
+    "settings": {
+     "noises": [
+      {
+       "type": "rand",
+       "delay": "10-16",
+       "packet": "10-20"
+      }
+     ],
+     "fragment": {
+      "length": "50-100",
+      "packets": "tlshello",
+      "interval": "5"
+     }
+    }
+   },
+   {
+    "tag": "direct",
+    "protocol": "freedom"
+   },
+   {
+    "tag": "block",
+    "protocol": "blackhole"
+   }
+  ],
+  "remarks": "🇳🇱 Нидерланды TURBO TUN 2"
+ }
+]

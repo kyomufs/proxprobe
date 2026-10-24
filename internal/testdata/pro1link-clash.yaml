@@ -1,0 +1,274 @@
+mixed-port: 7890
+socks-port: 7891
+redir-port: 7892
+allow-lan: true
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+dns:
+  enable: true
+  use-hosts: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+  - 1.1.1.1
+  - 8.8.8.8
+  nameserver:
+  - 1.1.1.1
+  - 8.8.8.8
+  fake-ip-filter:
+  - '*.lan'
+  - stun.*.*.*
+  - stun.*.*
+  - time.windows.com
+  - time.nist.gov
+  - time.apple.com
+  - time.asia.apple.com
+  - '*.openwrt.pool.ntp.org'
+  - pool.ntp.org
+  - ntp.ubuntu.com
+  - time1.apple.com
+  - time2.apple.com
+  - time3.apple.com
+  - time4.apple.com
+  - time5.apple.com
+  - time6.apple.com
+  - time7.apple.com
+  - time1.google.com
+  - time2.google.com
+  - time3.google.com
+  - time4.google.com
+  - api.joox.com
+  - joox.com
+  - '*.xiami.com'
+  - '*.msftconnecttest.com'
+  - '*.msftncsi.com'
+  - +.xboxlive.com
+  - '*.*.stun.playstation.net'
+  - xbox.*.*.microsoft.com
+  - '*.ipv6.microsoft.com'
+  - speedtest.cros.wr.pvp.net
+proxies:
+- name: 🇳🇱 Нидерланды TURBO TUN 1
+  type: vless
+  server: tyctyvsjec.localto.net
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  tls: true
+  servername: tyctyvsjec.localto.net
+  reality-opts:
+    public-key: tei5wyEWqA4cWDUe-gRJkAiOYiA7FQAZ30p6sapdDmA
+    short-id: 35a485128f35f588
+  client-fingerprint: qq
+- name: 🇳🇱 Нидерланды TURBO TUN 2
+  type: vless
+  server: tzablmgo5f.localto.net
+  port: 2812
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  tls: true
+  servername: vaplawzcgt.a.pinggy.link
+  reality-opts:
+    public-key: tei5wyEWqA4cWDUe-gRJkAiOYiA7FQAZ30p6sapdDmA
+    short-id: 35a485128f35f588
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #1'
+  type: vless
+  server: ru-bridge01.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-1798d5c0a1b9b86c.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #3'
+  type: vless
+  server: ru-bridge03.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-ae60127289600263.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #4'
+  type: vless
+  server: ru-bridge04.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-59d9a525e74d53bf.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #5'
+  type: vless
+  server: ru-bridge05.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-dafc46de6da897a3.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #6'
+  type: vless
+  server: ru-bridge06.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-dda9e0ef5497a511.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #7'
+  type: vless
+  server: ru-bridge07.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-e01c9b4cfda17b46.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #8'
+  type: vless
+  server: ru-bridge08.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-5aa0395f3c7fa51e.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #9'
+  type: vless
+  server: ru-bridge09.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-d86e63764aeeb4bc.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды TURBO #10'
+  type: vless
+  server: ru-bridge10.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-e9636fdd5bb2ceb0.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: 🇳🇱 Нидерланды · Aeza СПб
+  type: vless
+  server: ru-bridge11.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-39ecce7797409f3d.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: qq
+- name: '🇳🇱 Нидерланды 10gbit TURBO #2'
+  type: vless
+  server: ru-nl-028ec01c735f.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-c0b96d449c9ec144.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: firefox
+- name: '🇳🇱 Нидерланды 10gbit TURBO #3'
+  type: vless
+  server: ru-nl-acd4de73f563.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-3548ed3b14483468.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: firefox
+- name: '🇳🇱 Нидерланды 10gbit TURBO #6'
+  type: vless
+  server: ru-nl-a4d20a05ef80.myprotechnology.ru
+  port: 443
+  network: tcp
+  udp: true
+  uuid: b9e20aa5-2065-447b-9c9e-0ec9fe93a687
+  packet-encoding: xudp
+  flow: xtls-rprx-vision
+  tls: true
+  servername: edge-1a76dc8dbc8b9b53.myprotechnology.ru
+  reality-opts:
+    public-key: KvBW7vXCBIRSy78NgErmBnYKNUDLyx1dPBiQop3s03g
+    short-id: 831b67ef346812ed
+  client-fingerprint: firefox
