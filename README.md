@@ -17,8 +17,9 @@ mihomo и выгружает результат в Clash YAML.
   vless-ссылке и в Clash YAML, схлопывается в один.
 - **Проверяет** узлы TCP-диалом, затем — реальным HTTP-запросом через ядро
   (это ловит узлы, которые принимают соединение, но не пропускают трафик).
-- **Выгружает** в `clash.yaml` (все живые) и `best.yaml` (отсортированные по
-  задержке).
+- **Выгружает** в `clash.yaml` (все узлы) и `best.yaml` (живые, по
+  возрастанию задержки). Группы плоские: `PROXY` → `AUTO` и страны,
+  страна → её узлы. Вложенных селекторов нет.
 - **Экспорт — только Clash/mihomo.** Парсеры Xray и sing-box остались, потому
   что источники в этих форматах приходят, но на выходе их нет.
 
@@ -49,7 +50,7 @@ proxprobe parse               # разобрать в out/nodes/
 proxprobe merge               # слить источники без дубликатов → out/merged.jsonl
 proxprobe ping                # TCP-проверка → out/tcp.jsonl
 proxprobe probe               # запрос через ядро → out/http.jsonl
-proxprobe export              # → out/out/clash.yaml, out/out/best.yaml
+proxprobe export              # → out/profiles/clash.yaml, out/profiles/best.yaml
 ```
 
 ### Флаги
@@ -125,8 +126,8 @@ internal/testdata/   фикстуры всех пяти форматов
 <workdir>/tcp.jsonl          после TCP-проверки
 <workdir>/http.jsonl         после проверки через ядро
 <workdir>/skip.log           строки, которые не удалось разобрать
-<workdir>/out/clash.yaml     все живые узлы
-<workdir>/out/best.yaml      отсортированные по задержке
+<workdir>/profiles/clash.yaml    все узлы
+<workdir>/profiles/best.yaml     живые, по возрастанию задержки
 ```
 
 Всё промежуточное — JSONL, поэтому любой шаг можно посмотреть глазами или

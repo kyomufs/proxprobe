@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/kyomufs/proxprobe/internal/detect"
 	"github.com/kyomufs/proxprobe/internal/emit"
 	"github.com/kyomufs/proxprobe/internal/fetch"
+	"github.com/kyomufs/proxprobe/internal/layout"
 	"github.com/kyomufs/proxprobe/internal/merge"
 	"github.com/kyomufs/proxprobe/internal/model"
 	"github.com/kyomufs/proxprobe/internal/parse"
@@ -106,7 +106,7 @@ func cmdFetch(ctx context.Context, args []string) error {
 	list = sources.Active(list)
 
 	results := fetch.All(ctx, list, fetch.Options{
-		RawDir:  filepath.Join(c.workdir, "raw"),
+		RawDir:  layout.DirPath(c.workdir, layout.RawDir),
 		Refresh: *refresh,
 	})
 
@@ -139,13 +139,13 @@ func cmdParse(_ context.Context, args []string) error {
 		return err
 	}
 
-	nodesDir := filepath.Join(c.workdir, "nodes")
+	nodesDir := layout.DirPath(c.workdir, layout.NodesDir)
 	if err := os.MkdirAll(nodesDir, 0o755); err != nil {
 		return err
 	}
 
 	var total int
-	var skipPath = filepath.Join(c.workdir, "skip.log")
+	var skipPath = layout.SkipPath(c.workdir)
 	skipFile, err := os.Create(skipPath)
 	if err != nil {
 		return err
@@ -156,7 +156,7 @@ func cmdParse(_ context.Context, args []string) error {
 		if *only != "" && s.ID != *only {
 			continue
 		}
-		path := filepath.Join(c.workdir, "raw", s.ID+".raw")
+		path := layout.RawPath(c.workdir, s.ID)
 		body, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Printf("  %-20s SKIPPED (no raw file)\n", s.ID)
@@ -166,7 +166,7 @@ func cmdParse(_ context.Context, args []string) error {
 		format, decoded := detect.Sniff(body)
 		res := parseAs(format, decoded, s.ID)
 
-		outPath := filepath.Join(nodesDir, s.ID+".jsonl")
+		outPath := layout.NodesPath(c.workdir, s.ID)
 		if err := writeNodesJSONL(outPath, res.Nodes); err != nil {
 			return err
 		}
@@ -245,7 +245,7 @@ func loadNodeGroups(config, workdir string) ([][]model.Node, []string, error) {
 	var groups [][]model.Node
 	var ids []string
 	for _, s := range sources.Active(list) {
-		path := filepath.Join(workdir, "nodes", s.ID+".jsonl")
+		path := layout.NodesPath(workdir, s.ID)
 		nodes, err := readNodesJSONL(path)
 		if err != nil {
 			continue // источник не разобран — это не ошибка всего запуска
@@ -273,7 +273,7 @@ func cmdMerge(_ context.Context, args []string) error {
 	}
 	nodes, report := merge.Merge(groups)
 
-	outPath := filepath.Join(c.workdir, "merged.jsonl")
+	outPath := layout.MergedPath(c.workdir)
 	if err := writeNodesJSONL(outPath, nodes); err != nil {
 		return err
 	}
@@ -310,13 +310,13 @@ func cmdPing(ctx context.Context, args []string) error {
 		return err
 	}
 
-	nodes, err := readNodesJSONL(filepath.Join(c.workdir, "merged.jsonl"))
+	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
 	if err != nil {
 		return fmt.Errorf("run merge first: %w", err)
 	}
 
 	results := probe.TCP(ctx, nodes, *concurrency, *timeout)
-	if err := probe.WriteJSONL(filepath.Join(c.workdir, "tcp.jsonl"), results); err != nil {
+	if err := probe.WriteJSONL(layout.TCPPath(c.workdir), results); err != nil {
 		return err
 	}
 
@@ -342,7 +342,7 @@ func cmdProbe(ctx context.Context, args []string) error {
 		return err
 	}
 
-	nodes, err := readNodesJSONL(filepath.Join(c.workdir, "merged.jsonl"))
+	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
 	if err != nil {
 		return fmt.Errorf("run merge first: %w", err)
 	}
@@ -366,7 +366,7 @@ func cmdProbe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := probe.WriteResults(filepath.Join(c.workdir, "http.jsonl"), results); err != nil {
+	if err := probe.WriteResults(layout.HTTPPath(c.workdir), results); err != nil {
 		return err
 	}
 
@@ -394,7 +394,7 @@ func cmdExport(_ context.Context, args []string) error {
 		return err
 	}
 
-	nodes, err := readNodesJSONL(filepath.Join(c.workdir, "merged.jsonl"))
+	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
 	if err != nil {
 		return fmt.Errorf("run merge first: %w", err)
 	}
@@ -405,7 +405,7 @@ func cmdExport(_ context.Context, args []string) error {
 		targets = strings.Split(*target, ",")
 	}
 
-	paths, err := emit.WriteAll(filepath.Join(c.workdir, "out"), nodes, targets)
+	paths, err := emit.WriteAll(layout.ProfilesDirPath(c.workdir), nodes, targets)
 	if err != nil {
 		return err
 	}
@@ -425,7 +425,7 @@ func cmdExport(_ context.Context, args []string) error {
 // маршруте запрос отвечает 2xx напрямую, а задержка принадлежит каналу
 // хоста, а не узлу.
 func attachDelays(workdir string, nodes []model.Node) []model.Node {
-	results, err := probe.ReadResults(filepath.Join(workdir, "http.jsonl"))
+	results, err := probe.ReadResults(layout.HTTPPath(workdir))
 	if err != nil {
 		return nodes
 	}
@@ -455,7 +455,7 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 // tcpReachable читает tcp.jsonl и возвращает узлы с открытым портом.
 // Второе значение — был ли файл: без него отбор идёт только по HTTP-пробе.
 func tcpReachable(workdir string) (map[string]bool, bool) {
-	items, err := probe.ReadTCPResults(filepath.Join(workdir, "tcp.jsonl"))
+	items, err := probe.ReadTCPResults(layout.TCPPath(workdir))
 	if err != nil {
 		return nil, false
 	}
@@ -485,12 +485,19 @@ func cmdAll(ctx context.Context, args []string) error {
 		{"export", cmdExport, []string{"target"}},
 	}
 
-	for _, st := range steps {
-		fmt.Printf("== %s\n", st.name)
+	allStarted := time.Now()
+	for i, st := range steps {
+		// Прогресс в stderr: stdout каждого шага — данные, которые можно
+		// перенаправить в файл, а «шаг 2 из 6» в тот же поток их испортил бы.
+		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(steps), st.name)
+		started := time.Now()
 		if err := st.fn(ctx, filterArgs(args, st.own)); err != nil {
 			return fmt.Errorf("step %s: %w", st.name, err)
 		}
+		fmt.Fprintf(os.Stderr, "[%d/%d] %s готово за %s\n",
+			i+1, len(steps), st.name, time.Since(started).Round(time.Millisecond))
 	}
+	fmt.Fprintf(os.Stderr, "конвейер завершён за %s\n", time.Since(allStarted).Round(time.Millisecond))
 	return nil
 }
 

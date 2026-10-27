@@ -233,3 +233,95 @@ func TestClashUniqueNames(t *testing.T) {
 		t.Fatalf("duplicate names survived: %v and %v", doc.Proxies[0]["name"], doc.Proxies[1]["name"])
 	}
 }
+
+func TestClashGroupsByCountry(t *testing.T) {
+	// Три узла одной страны и один другой: группа создаётся только там,
+	// где есть выбор, иначе список групп засоряется одиночками.
+	nodes := sampleNodes(t)
+	a := nodes[0]
+	a.Name = "🇳🇱 Нидерланды TURBO #1"
+	a.Server = "nl1.example.com"
+	a.Finalize()
+	b := nodes[0]
+	b.Name = "🇳🇱 Нидерланды TURBO #2"
+	b.Server = "nl2.example.com"
+	b.Finalize()
+
+	body, err := Clash([]model.Node{a, b, nodes[1]})
+	if err != nil {
+		t.Fatalf("Clash() returned error: %v", err)
+	}
+	var doc struct {
+		ProxyGroups []map[string]any `yaml:"proxy-groups"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("generated YAML does not parse: %v", err)
+	}
+	// PROXY + AUTO + Нидерланды.
+	if len(doc.ProxyGroups) != 3 {
+		t.Fatalf("got %d groups, want PROXY, AUTO and Нидерланды", len(doc.ProxyGroups))
+	}
+	if doc.ProxyGroups[0]["name"] != "PROXY" {
+		t.Errorf("PROXY must come first, got %v", doc.ProxyGroups[0]["name"])
+	}
+	if doc.ProxyGroups[2]["name"] != "Нидерланды" {
+		t.Errorf("country group missing, got %v", doc.ProxyGroups[2]["name"])
+	}
+}
+
+func TestClashKeepsEmojiReadable(t *testing.T) {
+	// yaml.v3 экранирует всё вне ASCII, и профиль превращается в
+	// "\U0001F1F8\U0001F1EA Швеция" — валидно, но нечитаемо в клиентах.
+	nodes := sampleNodes(t)
+	nodes[0].Name = "🇸🇪 Швеция"
+	nodes[0].Finalize()
+
+	body, err := Clash([]model.Node{nodes[0]})
+	if err != nil {
+		t.Fatalf("Clash() returned error: %v", err)
+	}
+	if strings.Contains(string(body), `\U0001`) {
+		t.Errorf("unicode escapes survived into the profile:\n%s", body)
+	}
+	if !strings.Contains(string(body), "Швеция") {
+		t.Error("node name lost from the profile")
+	}
+}
+
+func TestEmptyProfileIsValid(t *testing.T) {
+	// Пустой best.yaml после прогона без живых узлов должен остаться
+	// загружаемым файлом, а не ошибкой экспорта.
+	body, err := Best(nil)
+	if err != nil {
+		t.Fatalf("Best(nil) returned error: %v", err)
+	}
+	var doc struct {
+		Proxies     []map[string]any `yaml:"proxies"`
+		ProxyGroups []map[string]any `yaml:"proxy-groups"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("empty profile does not parse: %v", err)
+	}
+	if len(doc.ProxyGroups) != 1 {
+		t.Fatalf("empty profile has %d groups, want one", len(doc.ProxyGroups))
+	}
+}
+
+func TestCountryOfSkipsServiceIcons(t *testing.T) {
+	// «🇪🇺 ⚡️ Авто | Самый быстрый» — страной должно стать «Авто», а не
+	// значок. Иначе группы называются эмодзи.
+	cases := map[string]string{
+		"🇳🇱 Нидерланды TURBO #4":            "Нидерланды",
+		"🇪🇺 ⚡️ Авто | Самый быстрый (2)":     "Авто",
+		"🇪🇺 🎮 Авто | Белые списки 💎 (14)":  "Авто",
+		"🇬🇧 Великобритания":                   "Великобритания",
+		"🇳🇱 Нидерланды · Aeza СПб":           "Нидерланды",
+		"⚡️":                                "Другое",
+		"":                                  "Другое",
+	}
+	for name, want := range cases {
+		if got := countryOf(name); got != want {
+			t.Errorf("countryOf(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
