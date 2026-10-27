@@ -176,12 +176,16 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 		return nil, err
 	}
 
-	// Обход идёт socks-путём через mixed-port ядра. Режим global в конфиге
-	// направляет весь трафик через проверяемый узел, поэтому отдельно
-	// указывать имя узла не нужно.
-	checked := sockProbe(ctx, supported, cfg)
+	// Каждый узел идёт через селектор к ядру, который переключается на него
+	// перед запросом. Полагаться на режим global нельзя, см. writeMihomoConfig.
+	checked := sockProbe(ctx, supported, cfg, base)
 	return append(checked, unsupported...), nil
 }
+
+// ProbeGroup — имя селектора, через который идут проверочные запросы.
+// Конфиг ядра и код пробы ссылаются на него по имени, поэтому оно в одном
+// месте.
+const ProbeGroup = "PROBE"
 
 // writeMihomoConfig генерирует тестовый конфиг.
 //
@@ -193,17 +197,25 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) ([]str
 	doc := mihomoDoc{
 		MixedPort: cfg.MixedPort,
 		AllowLan:  false,
-		// Режим global обязателен: в режиме rule с MATCH,DIRECT весь трафик
-		// mixed-port уходил бы НАПРЯМУЮ, минуя проверяемый узел, и проба
-		// мерила бы собственный канал хоста. Проверено на живой машине:
-		// с rule ядро писало "[TCP] ... match Match using DIRECT".
-		Mode:               "global",
+		// Режим rule с явным селектором, а НЕ global.
+		//
+		// global без proxy-groups бесполезен: ядро подставляет встроенный
+		// селектор GLOBAL, у которого now=DIRECT, и весь проверочный трафик
+		// уходит напрямую. Живость тогда не проверяется вовсе — мёртвый узел
+		// 0.0.0.0:1 отвечал 2xx за 750 мс, а RTT мерил канал хоста. В логе
+		// это видно как "using GLOBAL" вместо "dial PROBE".
+		//
+		// rule + MATCH,PROBE плохо тем, что при невыбранном узле срабатывает
+		// первый прокси селектора. Поэтому селектор не создаётся неявно:
+		// его наполняют только узлы текущего батча, а sockProbe переключает
+		// его на каждый узел перед замером.
+		Mode:               "rule",
 		LogLevel:           "warning",
 		ExternalController: fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort),
 		UnifiedDelay:       true,
 		TCPConcurrent:      true,
 		Proxies:            make([]map[string]any, 0, len(nodes)),
-		Rules:              []string{"MATCH,DIRECT"},
+		Rules:              []string{"MATCH," + ProbeGroup},
 	}
 
 	used := map[string]int{}
@@ -218,6 +230,17 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) ([]str
 		doc.Proxies = append(doc.Proxies, proxy)
 		names = append(names, name)
 	}
+
+	// Группа обязана быть непустой: пустой proxies ядро не примет, а батч
+	// без единого совместимого узла до сюда не доходит.
+	if len(names) == 0 {
+		return nil, fmt.Errorf("probe: no core-compatible nodes to build config")
+	}
+	doc.ProxyGroups = []map[string]any{{
+		"name":    ProbeGroup,
+		"type":    "select",
+		"proxies": names,
+	}}
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)

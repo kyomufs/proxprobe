@@ -161,3 +161,23 @@ func ReadResults(path string) ([]Result, error) {
 func WriteResults(path string, items []Result) error {
 	return writeJSONL(path, items)
 }
+
+// ReadTCPResults читает результаты TCP-проверки.
+func ReadTCPResults(path string) ([]TCPResult, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []TCPResult
+	dec := json.NewDecoder(f)
+	for dec.More() {
+		var r TCPResult
+		if err := dec.Decode(&r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}

@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/kyomufs/proxprobe/internal/sources"
@@ -55,7 +57,12 @@ func One(ctx context.Context, s sources.Source, opts Options) Result {
 	if !opts.Refresh {
 		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
 			sum, err := fileSHA256(path)
-			if err == nil {
+			// Сырьё читается только если его происхождение известно. Файл без
+			// боковой записи мог быть скачан с другими заголовками (x-hwid,
+			// UA): сервер по ним отдаёт РАЗНЫЕ узлы, а прежний кэш молча
+			// возвращал заглушку. Пропуск перезаписи здесь дешевле, чем
+			// отладка конвейера на данных, к которым применён не тот запрос.
+			if err == nil && metaMatches(metaPath(path), s) {
 				return Result{ID: s.ID, Path: path, Size: int(info.Size()), SHA256: sum}
 			}
 		}
@@ -106,8 +113,52 @@ func One(ctx context.Context, s sources.Source, opts Options) Result {
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return Result{ID: s.ID, Error: err}
 	}
+	// Боковая запись пишется после сырья и без проверки ошибки в пути
+	// возврата: если она не запишется, следующий запуск просто перекачает
+	// файл заново — это дешевле, чем оставить кэш без опознавания.
+	_ = writeMeta(metaPath(path), s)
+
 	sum := sha256.Sum256(body)
 	return Result{ID: s.ID, Path: path, Size: len(body), SHA256: hex.EncodeToString(sum[:])}
+}
+
+// metaPath — боковая запись о том, каким запросом получено сырьё.
+func metaPath(rawPath string) string { return rawPath + ".meta.json" }
+
+// fetchMeta — то, от чего зависит содержимое ответа. URL и заголовки
+// сравниваются целиком: подписки меняют выдачу по любому из них, а разница
+// между 34 реальными узлами и заглушкой 0.0.0.0:1 в них не видна.
+type fetchMeta struct {
+	URL     string            `json:"url"`
+	UA      string            `json:"ua"`
+	Headers map[string]string `json:"headers"`
+	Insecure bool             `json:"insecure"`
+}
+
+func metaFor(s sources.Source) fetchMeta {
+	return fetchMeta{URL: s.URL, UA: s.UA, Headers: s.Headers, Insecure: s.Insecure}
+}
+
+func writeMeta(path string, s sources.Source) error {
+	body, err := json.MarshalIndent(metaFor(s), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o644)
+}
+
+// metaMatches сообщает, скачано ли сырьё тем же запросом, что описан сейчас.
+// Отсутствие или порча записи — повод перекачать.
+func metaMatches(path string, s sources.Source) bool {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var got fetchMeta
+	if err := json.Unmarshal(body, &got); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(got, metaFor(s))
 }
 
 func fileSHA256(path string) (string, error) {

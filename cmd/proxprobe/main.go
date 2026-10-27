@@ -418,16 +418,28 @@ func cmdExport(_ context.Context, args []string) error {
 
 // attachDelays переносит замеры HTTP-пробы в Raw узлов: экспортёр best
 // отбирает и сортирует именно по ним.
+//
+// Узел считается живым, только если HTTP-запрос прошёл И TCP-этап до него
+// тоже дал коннект. Без второй проверки мёртвый узел с refused-портом
+// попадал в best.yaml: проба ходит через ядро, и при неверно выбранном
+// маршруте запрос отвечает 2xx напрямую, а задержка принадлежит каналу
+// хоста, а не узлу.
 func attachDelays(workdir string, nodes []model.Node) []model.Node {
 	results, err := probe.ReadResults(filepath.Join(workdir, "http.jsonl"))
 	if err != nil {
 		return nodes
 	}
+	reachable, hasTCP := tcpReachable(workdir)
+
 	delays := map[string]float64{}
 	for _, r := range results {
-		if r.OK {
-			delays[r.ID] = r.DelayMs
+		if !r.OK {
+			continue
 		}
+		if hasTCP && !reachable[r.ID] {
+			continue
+		}
+		delays[r.ID] = r.DelayMs
 	}
 	for i := range nodes {
 		if d, ok := delays[nodes[i].ID]; ok {
@@ -438,6 +450,22 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 		}
 	}
 	return nodes
+}
+
+// tcpReachable читает tcp.jsonl и возвращает узлы с открытым портом.
+// Второе значение — был ли файл: без него отбор идёт только по HTTP-пробе.
+func tcpReachable(workdir string) (map[string]bool, bool) {
+	items, err := probe.ReadTCPResults(filepath.Join(workdir, "tcp.jsonl"))
+	if err != nil {
+		return nil, false
+	}
+	live := make(map[string]bool, len(items))
+	for _, r := range items {
+		if r.OK {
+			live[r.ID] = true
+		}
+	}
+	return live, true
 }
 
 func cmdAll(ctx context.Context, args []string) error {

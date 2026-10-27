@@ -1,10 +1,14 @@
 package probe
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,13 +24,12 @@ import (
 // на машине с уже поднятым VPN системный резолвер отдаёт fake-IP
 // (198.18.0.0/16) — так работает fake-ip режим боевого клиента. Тестовое
 // ядро резолвит имя узла в этот же fake-адрес, уходит на него и получает
-// ошибку, хотя узел полностью работоспособен. Проверено на этой машине:
-// /delay отвечает "An error occurred in the delay test" при живом flclash,
-// тогда как прямой socks-запрос к тому же узлу отдаёт 204 за 0.12 с.
+// ошибку, хотя узел полностью работоспособен.
 //
-// Socks-путь свободен от этой проблемы: имя узла уходит в ядро внутри
-// SOCKS-запроса, а не через локальный резолвер.
-func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig) []Result {
+// Селектор ProbeGroup переключается на каждый узел перед замером: без
+// переключения весь батч ушёл бы через первый прокси группы, и 499 из 500
+// узлов получили бы чужую задержку и чужой вердикт.
+func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, controlBase string) []Result {
 	results := make([]Result, len(nodes))
 	workers := cfg.Concurrency
 	if workers <= 0 {
@@ -53,9 +56,28 @@ func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig) []Resu
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			delay, err := fetchThrough(ctx, dialer, n.Name, coreNameFor(cfg, n), cfg)
 			res := Result{ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto, Via: "socks"}
-			if err != nil {
+			coreName := coreNameFor(cfg, n)
+
+			// Селектор переключается и запрос идёт ПОД ОДНИМ замком, а не
+			// под семафором параллельности. Семафор ограничивает число
+			// одновременных воркеров, но не мешает соседу переключить
+			// селектор между PUT и началом TLS-соединения: запрос тогда
+			// уходит через чужой узел. На реальном прогоне это выглядело как
+			// «все 32 узла проверялись через 217.60.59.1:2053» — первый,
+			// кому повезло стартовать, утаскивал за собой весь батч.
+			selectMu.Lock()
+			selErr := selectNode(ctx, controlBase, ProbeGroup, coreName, cfg.Timeout)
+			var delay float64
+			var err error
+			if selErr == nil {
+				delay, err = fetchThrough(ctx, dialer, n.Name, coreName, cfg)
+			}
+			selectMu.Unlock()
+
+			if selErr != nil {
+				res.Error = "select node: " + selErr.Error()
+			} else if err != nil {
 				res.Error = err.Error()
 			} else {
 				res.OK = true
@@ -87,10 +109,51 @@ func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig) []Resu
 	return results
 }
 
+// selectMu сериализует «переключить селектор + сделать запрос»: селектор
+// ProbeGroup один на батч, и параллельно переключать его нельзя.
+var selectMu sync.Mutex
+
 // coreNameFor возвращает имя узла, под которым он объявлен в конфиге ядра.
-// Для socks-пути имя не используется — запрос идёт через mixed-port, где
-// активен режим global — но параметр оставлен ради единой сигнатуры.
+// Именно это имя селектор ProbeGroup принимает в PUT /proxies/PROBE.
 func coreNameFor(_ MihomoConfig, n model.Node) string { return n.Name }
+
+// selectNode переключает селектор ядра на узел с указанным именем.
+//
+// Ошибка здесь означает, что замер сделан бы не по тому узлу (или напрямую),
+// поэтому узел помечается как непроверенный, а не как живой.
+func selectNode(ctx context.Context, controlBase, group, name string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	payload, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		controlBase+"/proxies/"+url.PathEscape(group), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := controlClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return fmt.Errorf("%s: HTTP %d %s", group, resp.StatusCode, bytes.TrimSpace(body))
+	}
+	return nil
+}
+
+// controlClient — клиент REST API ядра. Отдельный от http.DefaultClient:
+// тот ходит через прокси из окружения, а API живёт на localhost.
+var controlClient = &http.Client{Timeout: 10 * time.Second}
 
 // fetchThrough выполняет HTTP-запрос через socks-диалайнер и возвращает
 // задержку в миллисекундах.
