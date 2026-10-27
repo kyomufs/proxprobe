@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,6 +106,14 @@ func Mihomo(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result
 
 		results, err := mihomoBatch(ctx, nodes[start:end], cfg)
 		if err != nil {
+			// Ошибки окружения (ядро не найдено, порты заняты чужим
+			// процессом) — не «плохие узлы», а невозможность проверить
+			// хоть один. Если их проглотить, прогон вернёт тысячу
+			// batch-failed и выглядит как «все узлы мёртвы», хотя дело было
+			// в занятом порту. Поэтому такие ошибки останавливают прогон.
+			if isSetupError(err) {
+				return nil, err
+			}
 			// Один батч не должен ронять прогон: помечаем его узлы как
 			// непроверенные и идём дальше.
 			lastErr = err
@@ -124,8 +134,27 @@ func Mihomo(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result
 	return all, nil
 }
 
-func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result, error) {
-	supported := make([]model.Node, 0, len(nodes))
+// isSetupError сообщает, что ошибка относится к окружению прогона, а не к
+// узлам: ядро недоступно или его порты заняты.
+func isSetupError(err error) bool {
+	msg := err.Error()
+	for _, marker := range []string{
+		"not found in PATH",
+		"is busy",
+		"cannot start",
+		"cannot create run dir",
+		"cannot render core config",
+		"REST API did not come up",
+		"no core-compatible nodes",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result, error) {	supported := make([]model.Node, 0, len(nodes))
 	unsupported := make([]Result, 0)
 
 	for _, n := range nodes {
@@ -159,6 +188,14 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 	}
 	defer os.RemoveAll(runDir)
 
+	// Порты проверяются ДО старта. Если их держит чужое ядро (параллельный
+	// прогон, живой клиент), наш процесс поднимется без инбаунда, а проба
+	// будет мерить чужой конфиг: REST API чужого ядра ответит, mixed-port
+	// чужого ядра примет запрос, и вердикты будут по чужим узлам.
+	if err := portsFree(cfg); err != nil {
+		return nil, err
+	}
+
 	configPath := filepath.Join(runDir, "config.yaml")
 	if _, err := writeMihomoConfig(configPath, supported, cfg); err != nil {
 		return nil, err
@@ -176,10 +213,39 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 		return nil, err
 	}
 
+	// Порты должны принадлежать ИМЕННО этому ядру.
+	//
+	// Простой «кто-то слушает» не ловит случай: если порт уже занят чужим
+	// ядром (параллельный прогон, живой клиент), чужой слушатель обнаружен,
+	// а наш процесс пишет в лог "bind: address already in use" и остаётся
+	// жив без инбаунда. Проба тогда мерит чужой конфиг и выдаёт вердикты по
+	// чужим узлам. Поэтому порты занимаются ДО старта процесса.
 	// Каждый узел идёт через селектор к ядру, который переключается на него
 	// перед запросом. Полагаться на режим global нельзя, см. writeMihomoConfig.
 	checked := sockProbe(ctx, supported, cfg, base)
 	return append(checked, unsupported...), nil
+}
+
+// portsFree проверяет, что mixed-port и external-controller свободны.
+//
+// Занятый порт означает, что поднимется не наш стек: ядро останется без
+// инбаунда, а проба будет ходить через чужое ядро и мерить чужие узлы.
+func portsFree(cfg MihomoConfig) error {
+	for _, p := range []struct {
+		port int
+		what string
+	}{
+		{cfg.MixedPort, "mixed-port"},
+		{cfg.ControlPort, "external-controller"},
+	} {
+		addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(p.port))
+		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return fmt.Errorf("probe: %s %d is busy: another core holds it, stop it or change the port", p.what, p.port)
+		}
+	}
+	return nil
 }
 
 // ProbeGroup — имя селектора, через который идут проверочные запросы.
