@@ -342,6 +342,12 @@ func cmdProbe(ctx context.Context, args []string) error {
 	testURL := fs.String("url", "", "URL to fetch through each node")
 	timeout := fs.Duration("timeout", 0, "per-node timeout")
 	concurrency := fs.Int("concurrency", 16, "parallel node probes")
+	// Порты ядра вынесены в флаги, потому что по умолчанию они фиксированы, а
+	// два одновременных прогона на одной машине иначе не развести: второй
+	// упирается в «port is busy» и останавливается.
+	defaults := probe.Defaults()
+	mixedPort := fs.Int("mixed-port", defaults.MixedPort, "core socks/http inbound port")
+	controlPort := fs.Int("control-port", defaults.ControlPort, "core REST API port")
 
 	if *timeout == 0 {
 		*timeout = 5 * time.Second
@@ -361,6 +367,8 @@ func cmdProbe(ctx context.Context, args []string) error {
 	cfg.WorkDir = c.workdir
 	cfg.Timeout = *timeout
 	cfg.Concurrency = *concurrency
+	cfg.MixedPort = *mixedPort
+	cfg.ControlPort = *controlPort
 	if *testURL != "" {
 		cfg.TestURL = *testURL
 	}
@@ -413,8 +421,10 @@ func cmdExport(_ context.Context, args []string) error {
 		return fmt.Errorf("run merge first: %w", err)
 	}
 	before := len(nodes)
-	nodes = attachDelays(c.workdir, nodes)
+	var rep attachReport
+	nodes, rep = attachDelays(c.workdir, nodes)
 	nodes = dedupeByPool(nodes, *keepPools)
+	fmt.Fprintf(os.Stderr, "  отбор: %s\n", rep)
 	if *keepPools > 0 {
 		fmt.Fprintf(os.Stderr, "  pools: %d nodes -> %d (keep %d per server:port)\n",
 			before, len(nodes), *keepPools)
@@ -422,7 +432,7 @@ func cmdExport(_ context.Context, args []string) error {
 
 	targets := []string{"merged", "sorted"}
 	if *target != "all" {
-		targets = strings.Split(*target, ",")
+		targets = splitTargets(*target)
 	}
 
 	paths, err := emit.WriteAll(layout.ClashDirPath(c.workdir), nodes, targets)
@@ -430,10 +440,34 @@ func cmdExport(_ context.Context, args []string) error {
 		return err
 	}
 	for _, p := range paths {
-		info, _ := os.Stat(p)
+		// os.Stat без проверки ошибки ронял команду паникой на nil: путь,
+		// который WriteAll успел записать в список, но не успел создать.
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Printf("  %-40s %s\n", p, err)
+			continue
+		}
 		fmt.Printf("  %-40s %8d bytes\n", p, info.Size())
 	}
 	return nil
+}
+
+// splitTargets разбирает список целей из --target.
+//
+// Пробелы снимаются: «--target merged, sorted» — обычная запись списка, а
+// пустой элемент («merged,,sorted») раньше доезжал до WriteAll и валил экспорт
+// на «unknown target ""».
+func splitTargets(spec string) []string {
+	var out []string
+	for _, part := range strings.Split(spec, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"merged", "sorted"}
+	}
+	return out
 }
 
 // attachDelays переносит замеры HTTP-пробы в Raw узлов: экспортёр best
@@ -444,14 +478,23 @@ func cmdExport(_ context.Context, args []string) error {
 // попадал в sorted.yaml: проба ходит через ядро, и при неверно выбранном
 // маршруте запрос отвечает 2xx напрямую, а задержка принадлежит каналу
 // хоста, а не узлу.
-func attachDelays(workdir string, nodes []model.Node) []model.Node {
+//
+// Возвращается отчёт об отборе: узлы, выпавшие из-за отсутствия TCP-этапа,
+// нигде больше не видны, и без счётчика прогон выглядит так, будто они просто
+// не проверялись.
+func attachDelays(workdir string, nodes []model.Node) ([]model.Node, attachReport) {
+	var rep attachReport
 	results, err := probe.ReadResults(layout.HTTPPath(workdir))
 	if err != nil {
 		// HTTP-пробы не было: живость берётся из TCP, иначе sorted.yaml
 		// остаётся пустым скелетом, хотя порты открыты и замеры есть.
-		return tcpDelays(workdir, nodes)
+		nodes, rep.fromTCP = tcpDelays(workdir, nodes), true
+		rep.probeResults = 0
+		return nodes, rep
 	}
+	rep.probeResults = len(results)
 	reachable, hasTCP := tcpReachable(workdir)
+	rep.hasTCP = hasTCP
 
 	type verdict struct {
 		delay  float64
@@ -461,6 +504,7 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 	for _, r := range results {
 		if r.OK {
 			if hasTCP && !reachable[r.ID] {
+				rep.droppedNoTCP++
 				continue
 			}
 			verdicts[r.ID] = verdict{delay: r.DelayMs, status: probe.StatusAlive}
@@ -473,6 +517,7 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 			verdicts[r.ID] = verdict{delay: r.DelayMs, status: r.Status}
 		}
 	}
+	rep.verdicts = len(verdicts)
 	for i := range nodes {
 		v, ok := verdicts[nodes[i].ID]
 		if !ok {
@@ -484,7 +529,34 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 		nodes[i].Raw["delay_ms"] = v.delay
 		nodes[i].Raw["status"] = v.status
 	}
-	return nodes
+	return nodes, rep
+}
+
+// attachReport — что произошло при переносе замеров в узлы.
+//
+// Без этих чисел отбор невидим: узел, у которого HTTP-проба прошла, но TCP
+// не подтвердил живость, молча исчезал из профиля, и отличить это от «узел не
+// проверялся» было нельзя.
+type attachReport struct {
+	probeResults int  // сколько записей было в http.jsonl
+	verdicts     int  // сколько узлов получили вердикт
+	droppedNoTCP int  // 2xx без подтверждения TCP
+	fromTCP      bool // HTTP-пробы не было, задержки взяты из TCP
+	hasTCP       bool // tcp.jsonl вообще есть
+}
+
+// String печатает отбор одной строкой: числа идут в stderr, потому что
+// stdout занят данными шага.
+func (r attachReport) String() string {
+	parts := []string{fmt.Sprintf("проба=%d вердиктов=%d", r.probeResults, r.verdicts)}
+	if r.fromTCP {
+		parts = append(parts, "задержки из TCP (http.jsonl нет)")
+	} else if r.hasTCP {
+		parts = append(parts, fmt.Sprintf("без TCP-подтверждения=%d", r.droppedNoTCP))
+	} else {
+		parts = append(parts, "tcp.jsonl нет: отбор только по HTTP")
+	}
+	return strings.Join(parts, " ")
 }
 
 // tcpDelays переносит TCP-замеры в Raw узлов, когда HTTP-пробы не было.
@@ -630,7 +702,7 @@ func cmdAll(ctx context.Context, args []string) error {
 		{"parse", cmdParse, []string{"source"}},
 		{"merge", cmdMerge, nil},
 		{"ping", cmdPing, []string{"concurrency", "timeout"}},
-		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency"}},
+		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency", "mixed-port", "control-port"}},
 		{"export", cmdExport, []string{"target", "keep-pools"}},
 	}
 

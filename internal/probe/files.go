@@ -12,9 +12,3 @@ func createFile(path string) (*os.File, error) {
 	}
 	return os.Create(path)
 }
-
-// exists проверяет наличие файла.
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}

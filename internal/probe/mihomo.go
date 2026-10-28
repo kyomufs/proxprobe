@@ -3,11 +3,10 @@ package probe
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -154,7 +153,8 @@ func isSetupError(err error) bool {
 	return false
 }
 
-func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result, error) {	supported := make([]model.Node, 0, len(nodes))
+func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result, error) {
+	supported := make([]model.Node, 0, len(nodes))
 	unsupported := make([]Result, 0)
 
 	for _, n := range nodes {
@@ -182,7 +182,7 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 		return nil, err
 	}
 
-	runDir, err := os.MkdirTemp(cfg.WorkDir, "mihomo-probe-")
+	runDir, err := os.MkdirTemp("", "mihomo-probe-")
 	if err != nil {
 		return nil, fmt.Errorf("probe: cannot create run dir: %w", err)
 	}
@@ -197,19 +197,34 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 	}
 
 	configPath := filepath.Join(runDir, "config.yaml")
-	if _, err := writeMihomoConfig(configPath, supported, cfg); err != nil {
+	coreNames, skipped, err := writeMihomoConfig(configPath, supported, cfg)
+	if err != nil {
 		return nil, err
+	}
+	// Узлы, которым ядро не может дать запись, не теряются: они попадают в
+	// результат о непроверенными и видны в счётчиках отчёта.
+	for _, n := range skipped {
+		unsupported = append(unsupported, Result{
+			ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto,
+			OK: false, Error: "unsupported-by-core: core cannot represent this node",
+		})
 	}
 
 	cmd := exec.CommandContext(ctx, corePath, "-d", runDir, "-f", configPath)
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	// Вывод ядра идёт и в stderr (его видно в логе прогона), и в кольцевой
+	// буфер: когда ядро падает на разборе конфига, причина остаётся в его
+	// последних строках, а без буфера проба сообщает только «REST API did not
+	// come up» — то есть не говорит ни что именно не так, ни в каком узле.
+	coreLog := &tailBuffer{limit: 4096}
+	cmd.Stdout = io.MultiWriter(os.Stderr, coreLog)
+	cmd.Stderr = io.MultiWriter(os.Stderr, coreLog)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("probe: cannot start %s: %w", corePath, err)
 	}
 	defer stopProcess(cmd)
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.ControlPort)
-	if err := waitForCore(ctx, base, 15*time.Second); err != nil {
+	if err := waitForCore(ctx, base, 15*time.Second, coreLog); err != nil {
 		return nil, err
 	}
 
@@ -222,7 +237,7 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 	// чужим узлам. Поэтому порты занимаются ДО старта процесса.
 	// Каждый узел идёт через селектор к ядру, который переключается на него
 	// перед запросом. Полагаться на режим global нельзя, см. writeMihomoConfig.
-	checked := sockProbe(ctx, supported, cfg, base)
+	checked := sockProbe(ctx, supported, cfg, base, coreNames)
 	return append(checked, unsupported...), nil
 }
 
@@ -230,6 +245,17 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 //
 // Занятый порт означает, что поднимется не наш стек: ядро останется без
 // инбаунда, а проба будет ходить через чужое ядро и мерить чужие узлы.
+//
+// Проверка идёт через Listen, а не через Dial: «connect не отдал
+// ECONNREFUSED» — это не признак свободы порта, а признак того, что на нём
+// кто-то есть. Свободный порт как раз отвечает отказом, поэтому прежняя
+// проверка пропускала занятость насквозь (при медленном слушателе или
+// SO_REUSEADDR) и проба мерила чужой конфиг.
+//
+// Освобождение портов берётся явно, ДО старта ядра. Это окно гонки: между
+// Close и стартом ядра порт теоретически может занять кто-то ещё, но
+// закрыть его полностью нельзя без передачи сокета ядру, а цена ошибки в
+// этом окне — та же, что была раньше всегда.
 func portsFree(cfg MihomoConfig) error {
 	for _, p := range []struct {
 		port int
@@ -239,11 +265,11 @@ func portsFree(cfg MihomoConfig) error {
 		{cfg.ControlPort, "external-controller"},
 	} {
 		addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(p.port))
-		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
 			return fmt.Errorf("probe: %s %d is busy: another core holds it, stop it or change the port", p.what, p.port)
 		}
+		_ = ln.Close()
 	}
 	return nil
 }
@@ -253,13 +279,20 @@ func portsFree(cfg MihomoConfig) error {
 // месте.
 const ProbeGroup = "PROBE"
 
-// writeMihomoConfig генерирует тестовый конфиг.
+// writeMihomoConfig генерирует тестовый конфиг и возвращает имена, под
+// которыми узлы объявлены в нём, — по ID узла, — вместе со списком узлов,
+// которым ядро не может дать запись.
 //
 // Имена узлов делаются уникальными: mihomo отвергает ВЕСЬ конфиг, если два
 // прокси названы одинаково ("is the duplicate name"), а в публичных
 // подписках повторяющиеся имена — норма (разные серверы с одинаковым
 // названием локации). Дедуп по ID здесь не помогает: это разные серверы.
-func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) ([]string, error) {
+//
+// Карта возвращается наружу, потому что проба переключает селектор по имени:
+// повторить уникализацию на её стороне — значит разойтись с конфигом на
+// первом же дубле, и тогда PUT уходит на ЧУЖОЙ узел, а вердикт и задержка
+// приписываются не тому серверу.
+func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) (map[string]string, []model.Node, error) {
 	doc := mihomoDoc{
 		MixedPort: cfg.MixedPort,
 		AllowLan:  false,
@@ -286,21 +319,29 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) ([]str
 
 	used := map[string]int{}
 	names := make([]string, 0, len(nodes))
+	byID := make(map[string]string, len(nodes))
+	var skipped []model.Node
 	for _, n := range nodes {
 		proxy, err := proxyForCore(n)
 		if err != nil {
+			// Узел, который ядру отдать нельзя, раньше исчезал молча: он не
+			// попадал ни в конфиг, ни в отчёт. Теперь он возвращается
+			// вызывающей стороне как непроверенный — иначе прогон выглядит
+			// так, будто узел был проверен и оказался мёртв.
+			skipped = append(skipped, n)
 			continue
 		}
 		name := coreName(n.Name, used)
 		proxy["name"] = name
 		doc.Proxies = append(doc.Proxies, proxy)
 		names = append(names, name)
+		byID[n.ID] = name
 	}
 
 	// Группа обязана быть непустой: пустой proxies ядро не примет, а батч
 	// без единого совместимого узла до сюда не доходит.
 	if len(names) == 0 {
-		return nil, fmt.Errorf("probe: no core-compatible nodes to build config")
+		return nil, skipped, fmt.Errorf("probe: no core-compatible nodes to build config")
 	}
 	doc.ProxyGroups = []map[string]any{{
 		"name":    ProbeGroup,
@@ -312,12 +353,15 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) ([]str
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
-		return nil, fmt.Errorf("probe: cannot render core config: %w", err)
+		return nil, skipped, fmt.Errorf("probe: cannot render core config: %w", err)
 	}
 	if err := enc.Close(); err != nil {
-		return nil, err
+		return nil, skipped, err
 	}
-	return names, os.WriteFile(path, buf.Bytes(), 0o600)
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		return nil, skipped, err
+	}
+	return byID, skipped, nil
 }
 
 // coreName возвращает имя, под которым узел виден в REST API ядра.
@@ -447,7 +491,11 @@ func stopProcess(cmd *exec.Cmd) {
 }
 
 // waitForCore ждёт, пока REST API ядра ответит.
-func waitForCore(ctx context.Context, base string, timeout time.Duration) error {
+//
+// Если ядро вышло раньше срока, ждать бессмысленно: причина уже лежит в его
+// логе — именно она объясняет, какой узел не понравился ядру. Ошибка в этом
+// случае несёт последнюю содержательную строку лога.
+func waitForCore(ctx context.Context, base string, timeout time.Duration, coreLog *tailBuffer) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: time.Second}
 	for time.Now().Before(deadline) {
@@ -463,41 +511,43 @@ func waitForCore(ctx context.Context, base string, timeout time.Duration) error 
 				return nil
 			}
 		}
+		if line := lastFatal(coreLog.String()); line != "" {
+			return fmt.Errorf("probe: core exited: %s", line)
+		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("probe: core REST API did not come up within %s", timeout)
 }
 
-// queryDelay спрашивает у ядра задержку конкретного узла.
-func queryDelay(ctx context.Context, base, nodeName, testURL string, timeout time.Duration) (float64, error) {
-	endpoint := fmt.Sprintf("%s/proxies/%s/delay?url=%s&timeout=%d",
-		base, url.PathEscape(nodeName), url.QueryEscape(testURL), timeout.Milliseconds())
-
-	ctx, cancel := context.WithTimeout(ctx, timeout+3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return 0, err
+// lastFatal достаёт последнюю строку уровня fatal/error из лога ядра.
+//
+// Ядро пишет в лог всё, включая обычный ход загрузки, поэтому нужна именно
+// строка отказа: она и есть причина, по которой конфиг не принят.
+func lastFatal(log string) string {
+	var found string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "level=fatal") || strings.Contains(line, "level=error") {
+			found = strings.TrimSpace(line)
+		}
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	var payload struct {
-		Delay   float64 `json:"delay"`
-		Message string  `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return 0, fmt.Errorf("core returned unreadable response: %w", err)
-	}
-	if payload.Message != "" {
-		return 0, fmt.Errorf("%s", payload.Message)
-	}
-	if payload.Delay <= 0 {
-		return 0, fmt.Errorf("core reported zero delay")
-	}
-	return payload.Delay, nil
+	return found
 }
+
+// tailBuffer хранит последние limit байт записанного.
+//
+// Нужен для лога ядра: держать его целиком нет смысла, а последние строки —
+// это ровно то, что объясняет падение.
+type tailBuffer struct {
+	limit int
+	buf   []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = b.buf[len(b.buf)-b.limit:]
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string { return string(b.buf) }

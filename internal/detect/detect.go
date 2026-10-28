@@ -10,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"regexp"
-	"strings"
 )
 
 // Format — распознанный вид подписки.
@@ -158,18 +157,3 @@ func tryBase64(body []byte) ([]byte, bool) {
 
 // String нужен для читаемого вывода в отчёте.
 func (f Format) String() string { return string(f) }
-
-// IsLinks сообщает, разбирается ли формат как список share-ссылок.
-func (f Format) IsLinks() bool {
-	return f == FormatLinks || f == FormatLinksB64
-}
-
-// LooksLikeLinkLine — грубая проверка строки на share-ссылку. Нужна
-// парсерам, которые получают текст, перемешанный с комментариями.
-func LooksLikeLinkLine(line string) bool {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-		return false
-	}
-	return linkSchemeRe.MatchString(line)
-}

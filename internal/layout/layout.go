@@ -4,10 +4,10 @@
 //
 //	<workdir>/raw/<id>.raw          скачанное как есть + <id>.raw.meta.json
 //	<workdir>/nodes/<id>.jsonl      разобранные узлы по источникам
+//	<workdir>/nodes/skip.log        строки, которые не удалось разобрать
 //	<workdir>/probe/merged.jsonl    после слияния
 //	<workdir>/probe/tcp.jsonl       после TCP-проверки
 //	<workdir>/probe/http.jsonl      после проверки через ядро
-//	<workdir>/probe/skip.log        строки, которые не удалось разобрать
 //	<workdir>/clash/merged.yaml     все узлы, Clash-профиль
 //	<workdir>/clash/sorted.yaml     живые, по возрастанию задержки
 //
@@ -21,6 +21,10 @@ import (
 )
 
 // Имена подкаталогов и файлов внутри рабочего каталога.
+//
+// Имена Clash-профилей здесь не объявлены: их держит emit — тот пакет, что
+// их и пишет. Дублировать их тут означало бы второй источник правды, который
+// разъезжается при переименовании.
 const (
 	RawDir   = "raw"
 	NodesDir = "nodes"
@@ -31,21 +35,11 @@ const (
 	TCPFile    = "tcp.jsonl"
 	HTTPFile   = "http.jsonl"
 	SkipFile   = "skip.log"
-
-	MergedClash = "merged.yaml"
-	SortedClash = "sorted.yaml"
 )
 
 // RawPath — сырьё одного источника.
 func RawPath(workdir, id string) string {
 	return filepath.Join(workdir, RawDir, id+".raw")
-}
-
-// RawMetaPath — боковая запись с параметрами запроса, которым получено
-// сырьё. Без неё кэш не отличает подписку с нужным User-Agent от заглушки,
-// полученной тем же URL с другим заголовком.
-func RawMetaPath(workdir, id string) string {
-	return RawPath(workdir, id) + ".meta.json"
 }
 
 // NodesPath — разобранные узлы одного источника.
@@ -69,23 +63,17 @@ func HTTPPath(workdir string) string {
 }
 
 // SkipPath — строки, которые не удалось разобрать.
+//
+// Лежит в nodes/, а не в probe/: файл пишет шаг parse, и держать его в
+// каталоге шага, который его не касается, значит путать «где артефакт шага»
+// с «кто его создал» — ровно то, от чего раскладка по шагам и защищает.
 func SkipPath(workdir string) string {
-	return filepath.Join(workdir, ProbeDir, SkipFile)
+	return filepath.Join(workdir, NodesDir, SkipFile)
 }
 
 // ClashDirPath — каталог готовых Clash-профилей.
 func ClashDirPath(workdir string) string {
 	return filepath.Join(workdir, ClashDir)
-}
-
-// MergedClashPath — Clash-профиль со всеми узлами.
-func MergedClashPath(workdir string) string {
-	return filepath.Join(workdir, ClashDir, MergedClash)
-}
-
-// SortedClashPath — Clash-профиль только из живых узлов.
-func SortedClashPath(workdir string) string {
-	return filepath.Join(workdir, ClashDir, SortedClash)
 }
 
 // DirPath возвращает каталог, в котором шаг держит свои файлы. Нужен,

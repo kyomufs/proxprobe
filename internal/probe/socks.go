@@ -30,7 +30,7 @@ import (
 // Селектор ProbeGroup переключается на каждый узел перед замером: без
 // переключения весь батч ушёл бы через первый прокси группы, и 499 из 500
 // узлов получили бы чужую задержку и чужой вердикт.
-func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, controlBase string) []Result {
+func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, controlBase string, coreNames map[string]string) []Result {
 	results := make([]Result, len(nodes))
 	workers := cfg.Concurrency
 	if workers <= 0 {
@@ -61,7 +61,7 @@ func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, contro
 				ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto,
 				Via: "socks", Pool: PoolKey(n.Server, n.Port),
 			}
-			coreName := coreNameFor(cfg, n)
+			coreName := coreNameFor(coreNames, n)
 
 			// Селектор переключается и запрос идёт ПОД ОДНИМ замком, а не
 			// под семафором параллельности. Семафор ограничивает число
@@ -134,7 +134,15 @@ var selectMu sync.Mutex
 
 // coreNameFor возвращает имя узла, под которым он объявлен в конфиге ядра.
 // Именно это имя селектор ProbeGroup принимает в PUT /proxies/PROBE.
-func coreNameFor(_ MihomoConfig, n model.Node) string { return n.Name }
+//
+// Имя берётся из карты, собранной вместе с конфигом: повторно уникализировать
+// его здесь нельзя — расхождение с конфигом означает PUT на чужой узел.
+func coreNameFor(coreNames map[string]string, n model.Node) string {
+	if name, ok := coreNames[n.ID]; ok {
+		return name
+	}
+	return n.Name
+}
 
 // selectNode переключает селектор ядра на узел с указанным именем.
 //

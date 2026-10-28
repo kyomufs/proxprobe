@@ -132,7 +132,20 @@ func buildClash(nodes []model.Node) ([]byte, error) {
 		Rules:           []string{"MATCH,PROXY"},
 	}
 
+	// Имена занимаются в ОДНОМ пространстве: у mihomo прокси и группа лежат
+	// в общем словаре, и узел, названный как группа, делает конфиг циклом.
+	//
+	// В публичных подписках имя узла — это реклама канала («https://t.me/X»)
+	// или слово, из которого countryOf делает группу («Авто», «Другое»).
+	// Тогда клиент получает "loop is detected in ProxyGroup" и не грузит
+	// профиль ЦЕЛИКОМ. Поэтому имена групп занимаются заранее, до первого
+	// узла, и узел, претендующий на занятое имя, получает суффикс.
 	used := map[string]int{}
+	reserved := reservedNames(nodes)
+	for _, name := range reserved {
+		used[name]++
+	}
+
 	names := make([]string, 0, len(nodes))
 	byCountry := map[string][]string{}
 	var countryOrder []string
@@ -212,6 +225,41 @@ func buildClash(nodes []model.Node) ([]byte, error) {
 	}}, doc.ProxyGroups...)
 
 	return marshalYAML(doc)
+}
+
+// ReservedGroupNames — имена групп, которые профиль объявляет всегда.
+// Нужны, чтобы имя узла не совпало с ними (см. reservedNames).
+const (
+	ProxyGroupName = "PROXY"
+	AutoGroupName  = "AUTO"
+)
+
+// reservedNames возвращает имена групп, которые появятся в профиле для этих
+// узлов.
+//
+// Считать их заранее приходится потому, что страна узла известна только
+// после разбора имени, а имя узла зависит от того, занято ли уже её имя.
+// Порядок «сначала все группы, потом все узлы» разрывает эту петлю.
+//
+// Группы по странам создаются только при двух и более узлах: группа из
+// одного узла не даёт выбора. Список дублирует условие из buildClash
+// намеренно — это цена вычисления имён до их присвоения.
+func reservedNames(nodes []model.Node) []string {
+	countries := map[string]int{}
+	for _, n := range nodes {
+		if _, err := proxyForClash(n); err != nil {
+			continue
+		}
+		countries[countryOf(n.Name)]++
+	}
+
+	out := []string{ProxyGroupName, AutoGroupName}
+	for country, count := range countries {
+		if count >= 2 {
+			out = append(out, country)
+		}
+	}
+	return out
 }
 
 // delayOf возвращает замер задержки, положенный в Raw.

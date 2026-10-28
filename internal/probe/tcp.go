@@ -1,5 +1,10 @@
 // Package probe проверяет живость узлов: сначала дешёвым TCP-коннектом,
 // затем реальным HTTP-запросом через туннель ядра.
+//
+// Замер HTTP-пробы идёт не через встроенный REST-замер ядра, а обычным
+// SOCKS5-запросом через его mixed-port: на машине с работающим VPN системный
+// резолвер отдаёт fake-IP, и встроенный замер меряет не узел, а канал хоста.
+// Подробности — в socks.go.
 package probe
 
 import (
@@ -107,23 +112,6 @@ func writeJSONL[T any](path string, items []T) error {
 		}
 	}
 	return nil
-}
-
-// Alive возвращает узлы, прошедшие TCP-проверку.
-func Alive(nodes []model.Node, results []TCPResult) []model.Node {
-	live := map[string]bool{}
-	for _, r := range results {
-		if r.OK {
-			live[r.ID] = true
-		}
-	}
-	out := make([]model.Node, 0, len(nodes))
-	for _, n := range nodes {
-		if live[n.ID] {
-			out = append(out, n)
-		}
-	}
-	return out
 }
 
 // Summarise считает сводку по результатам TCP-проверки.
