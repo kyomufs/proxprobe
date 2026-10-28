@@ -27,6 +27,22 @@ const (
 	ProtoUnknown   = "unknown"
 )
 
+// Статусы узла по итогу HTTP-пробы.
+//
+// Живут в модели, а не в probe: экспортёр отбирает узлы по статусу и не
+// должен ради одной строковой константы тянуть пакет, который поднимает
+// ядро. Значения совпадают с тем, что пишет probe.
+const (
+	// StatusAlive — 2xx: узел прошёл запрос и годен в профиль.
+	StatusAlive = "alive"
+	// StatusThrottled — 429: узел жив, но его выходной IP упёрся в лимит.
+	StatusThrottled = "throttled"
+	// StatusForbidden — 403: узел жив, но цель его не пускает.
+	StatusForbidden = "forbidden"
+	// StatusDead — обрыв, таймаут или иная ошибка: узел непригоден.
+	StatusDead = "dead"
+)
+
 // Известные транспорты.
 const (
 	NetTCP         = "tcp"

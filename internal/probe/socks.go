@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,7 +57,10 @@ func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, contro
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res := Result{ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto, Via: "socks"}
+			res := Result{
+				ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto,
+				Via: "socks", Pool: PoolKey(n.Server, n.Port),
+			}
 			coreName := coreNameFor(cfg, n)
 
 			// Селектор переключается и запрос идёт ПОД ОДНИМ замком, а не
@@ -69,19 +73,34 @@ func sockProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, contro
 			selectMu.Lock()
 			selErr := selectNode(ctx, controlBase, ProbeGroup, coreName, cfg.Timeout)
 			var delay float64
+			var status string
 			var err error
 			if selErr == nil {
-				delay, err = fetchThrough(ctx, dialer, n.Name, coreName, cfg)
+				delay, status, err = fetchThrough(ctx, dialer, n.Name, coreName, cfg)
 			}
 			selectMu.Unlock()
 
-			if selErr != nil {
+			switch {
+			case selErr != nil:
+				res.Status = StatusDead
 				res.Error = "select node: " + selErr.Error()
-			} else if err != nil {
-				res.Error = err.Error()
-			} else {
+			case err == nil:
+				_ = status // классификация уже проверена в fetchThrough
 				res.OK = true
+				res.Status = StatusAlive
 				res.DelayMs = delay
+			default:
+				// Узел жив, если цель ответила хоть чем-то: 429 и 403 —
+				// это ответ, а не обрыв. В OK такие узлы не попадают
+				// намеренно: OK значит «годен в профиль».
+				var se *statusError
+				if errors.As(err, &se) {
+					res.Status = se.status
+					res.DelayMs = delay
+				} else {
+					res.Status = StatusDead
+				}
+				res.Error = err.Error()
 			}
 			results[i] = res
 			done.Add(1)
@@ -156,8 +175,12 @@ func selectNode(ctx context.Context, controlBase, group, name string, timeout ti
 var controlClient = &http.Client{Timeout: 10 * time.Second}
 
 // fetchThrough выполняет HTTP-запрос через socks-диалайнер и возвращает
-// задержку в миллисекундах.
-func fetchThrough(ctx context.Context, dialer proxy.Dialer, name, coreName string, cfg MihomoConfig) (float64, error) {
+// задержку в миллисекундах и статус узла.
+//
+// Код ответа разбирается, а не сводится к «прошло/не прошло»: 429 от цели
+// означает, что пул исчерпал квоту, и это не то же самое, что обрыв туннеля.
+// Возвращается ошибка только когда запрос не состоялся вовсе.
+func fetchThrough(ctx context.Context, dialer proxy.Dialer, name, coreName string, cfg MihomoConfig) (float64, string, error) {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			type ctxDialer interface {
@@ -180,17 +203,54 @@ func fetchThrough(ctx context.Context, dialer proxy.Dialer, name, coreName strin
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.TestURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer resp.Body.Close()
 
 	elapsed := float64(time.Since(start).Microseconds()) / 1000.0
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	status := classifyStatus(resp.StatusCode)
+	if status == StatusAlive {
+		// Тело 2xx не нужно: важно, что ответ пришёл, а чтение тела
+		// добавило бы к замеру чужую скорость канала цели.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return elapsed, status, nil
 	}
-	return elapsed, nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	return elapsed, status, &statusError{code: resp.StatusCode, status: status, body: bytes.TrimSpace(body)}
+}
+
+// statusError — ответ цели, при котором узел жив, но непригоден для неё.
+// Отделён от транспортных ошибок: у 429 другой смысл и другое лечение.
+type statusError struct {
+	code   int
+	status string
+	body   []byte
+}
+
+func (e *statusError) Error() string {
+	if len(e.body) > 0 {
+		return fmt.Sprintf("%s: HTTP %d %s", e.status, e.code, e.body)
+	}
+	return fmt.Sprintf("%s: HTTP %d", e.status, e.code)
+}
+
+// classifyStatus переводит код ответа в статус узла.
+//
+// 429 и 403 не считаются мёртвыми: узел дошёл до цели и получил осмысленный
+// ответ. Мёртвый узел — это обрыв, таймаут или иная транспортная ошибка.
+func classifyStatus(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return StatusAlive
+	case code == http.StatusTooManyRequests:
+		return StatusThrottled
+	case code == http.StatusForbidden:
+		return StatusForbidden
+	default:
+		return StatusDead
+	}
 }

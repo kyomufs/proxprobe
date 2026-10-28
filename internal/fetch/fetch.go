@@ -33,7 +33,21 @@ type Options struct {
 	Timeout time.Duration
 	// Refresh перекачивает даже то, что уже лежит на диске.
 	Refresh bool
+	// Attempts — сколько раз пробовать один источник, прежде чем считать
+	// его недоступным. 0 означает DefaultAttempts.
+	//
+	// Серверы подписок рвут TLS-handshake на части запросов: тот же URL
+	// отвечает 200 и `unexpected eof while reading` через раз, и один обрыв
+	// без повтора валит весь прогон на шаге fetch. Повтор здесь дешевле,
+	// чем перезапуск конвейера вручную.
+	Attempts int
 }
+
+// DefaultAttempts — сколько попыток делает fetch, если не сказано иное.
+const DefaultAttempts = 3
+
+// retryDelay — базовая пауза между попытками; растёт линейно.
+var retryDelay = time.Second
 
 // All скачивает все источники.
 //
@@ -67,42 +81,38 @@ func One(ctx context.Context, s sources.Source, opts Options) Result {
 			}
 		}
 	}
-
 	timeout := opts.Timeout
+
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: s.Insecure},
-		Proxy:           http.ProxyFromEnvironment,
-	}
-	client := &http.Client{Timeout: timeout, Transport: transport}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
-	if err != nil {
-		return Result{ID: s.ID, Error: err}
-	}
-	if s.UA != "" {
-		req.Header.Set("User-Agent", s.UA)
-	}
-	for k, v := range s.Headers {
-		req.Header.Set(k, v)
+	attempts := opts.Attempts
+	if attempts < 1 {
+		attempts = DefaultAttempts
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return Result{ID: s.ID, Error: fmt.Errorf("fetch %s: %w", s.ID, err)}
+	var (
+		body    []byte
+		lastErr error
+	)
+	for attempt := 1; attempt <= attempts; attempt++ {
+		body, lastErr = download(ctx, s, timeout)
+		if lastErr == nil {
+			break
+		}
+		// Отменённый контекст повторять бессмысленно.
+		if ctx.Err() != nil {
+			break
+		}
+		if attempt < attempts {
+			select {
+			case <-ctx.Done():
+			case <-time.After(retryDelay * time.Duration(attempt)):
+			}
+		}
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return Result{ID: s.ID, Error: fmt.Errorf("fetch %s: HTTP %d", s.ID, resp.StatusCode)}
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return Result{ID: s.ID, Error: fmt.Errorf("fetch %s: %w", s.ID, err)}
+	if lastErr != nil {
+		return Result{ID: s.ID, Error: lastErr}
 	}
 	// Пустой ответ не перезаписывает рабочее сырьё: иначе один сбой сети
 	// стирает данные, и следующий запуск молча работает с пустотой.
@@ -122,6 +132,47 @@ func One(ctx context.Context, s sources.Source, opts Options) Result {
 	return Result{ID: s.ID, Path: path, Size: len(body), SHA256: hex.EncodeToString(sum[:])}
 }
 
+// download делает одну попытку скачивания и возвращает тело ответа.
+//
+// Транспорт создаётся на каждую попытку: после оборванного TLS-handshake
+// переиспользовать пул соединений бессмысленно, а свежий клиент снимает
+// вопрос «сломался сервер или залип коннект».
+func download(ctx context.Context, s sources.Source, timeout time.Duration) ([]byte, error) {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: s.Insecure},
+		Proxy:           http.ProxyFromEnvironment,
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{Timeout: timeout, Transport: transport}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if s.UA != "" {
+		req.Header.Set("User-Agent", s.UA)
+	}
+	for k, v := range s.Headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", s.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch %s: HTTP %d", s.ID, resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("fetch %s: %w", s.ID, err)
+	}
+	return body, nil
+}
+
 // metaPath — боковая запись о том, каким запросом получено сырьё.
 func metaPath(rawPath string) string { return rawPath + ".meta.json" }
 
@@ -129,10 +180,10 @@ func metaPath(rawPath string) string { return rawPath + ".meta.json" }
 // сравниваются целиком: подписки меняют выдачу по любому из них, а разница
 // между 34 реальными узлами и заглушкой 0.0.0.0:1 в них не видна.
 type fetchMeta struct {
-	URL     string            `json:"url"`
-	UA      string            `json:"ua"`
-	Headers map[string]string `json:"headers"`
-	Insecure bool             `json:"insecure"`
+	URL      string            `json:"url"`
+	UA       string            `json:"ua"`
+	Headers  map[string]string `json:"headers"`
+	Insecure bool              `json:"insecure"`
 }
 
 func metaFor(s sources.Source) fetchMeta {

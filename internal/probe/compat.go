@@ -2,6 +2,8 @@ package probe
 
 import (
 	"crypto/tls"
+	"fmt"
+	"net"
 
 	"github.com/kyomufs/proxprobe/internal/model"
 )
@@ -72,6 +74,19 @@ func CoreCompatible(n model.Node) (bool, string) {
 	return true, ""
 }
 
+// Статусы узла по итогу HTTP-пробы. Значения объявлены в model, чтобы
+// экспортёр мог отбирать по ним, не импортируя probe.
+const (
+	// StatusAlive — 2xx: узел прошёл запрос и годен в профиль.
+	StatusAlive = model.StatusAlive
+	// StatusThrottled — 429: узел жив, но его выходной IP упёрся в лимит.
+	StatusThrottled = model.StatusThrottled
+	// StatusForbidden — 403: узел жив, но цель его не пускает.
+	StatusForbidden = model.StatusForbidden
+	// StatusDead — обрыв, таймаут или иная ошибка: узел непригоден.
+	StatusDead = model.StatusDead
+)
+
 // Result — итог реальной проверки узла через туннель.
 type Result struct {
 	ID      string  `json:"id"`
@@ -81,8 +96,19 @@ type Result struct {
 	Proto   string  `json:"proto"`
 	DelayMs float64 `json:"delay_ms"`
 	OK      bool    `json:"ok"`
+	Status  string  `json:"status,omitempty"`
+	Pool    string  `json:"pool,omitempty"` // server:port — ключ пула лимита
 	Error   string  `json:"error,omitempty"`
 	Via     string  `json:"via,omitempty"` // "socks" или "rest"
+}
+
+// PoolKey возвращает ключ пула лимита для узла: выходной адрес и порт.
+//
+// Сервисы обычно считают квоту на пул, а не на имя узла: десятки записей с
+// одним server:port делят один лимит. Группировать по этому ключу —
+// единственный способ не отдавать в профиль клоны, которые сгорят вместе.
+func PoolKey(server string, port int) string {
+	return net.JoinHostPort(server, fmt.Sprint(port))
 }
 
 // insecureTLS возвращает конфигурацию TLS для проб.

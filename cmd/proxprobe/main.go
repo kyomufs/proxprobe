@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -94,6 +95,7 @@ func cmdFetch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 	cb := bindCommon(fs)
 	refresh := fs.Bool("refresh", false, "re-download even if raw file exists")
+	attempts := fs.Int("attempts", fetch.DefaultAttempts, "attempts per source before giving up")
 	c, err := cb.parse(fs, args)
 	if err != nil {
 		return err
@@ -106,8 +108,9 @@ func cmdFetch(ctx context.Context, args []string) error {
 	list = sources.Active(list)
 
 	results := fetch.All(ctx, list, fetch.Options{
-		RawDir:  layout.DirPath(c.workdir, layout.RawDir),
-		Refresh: *refresh,
+		RawDir:   layout.DirPath(c.workdir, layout.RawDir),
+		Refresh:  *refresh,
+		Attempts: *attempts,
 	})
 
 	var failed int
@@ -146,6 +149,9 @@ func cmdParse(_ context.Context, args []string) error {
 
 	var total int
 	var skipPath = layout.SkipPath(c.workdir)
+	if err := layout.EnsurePath(skipPath); err != nil {
+		return err
+	}
 	skipFile, err := os.Create(skipPath)
 	if err != nil {
 		return err
@@ -274,6 +280,9 @@ func cmdMerge(_ context.Context, args []string) error {
 	nodes, report := merge.Merge(groups)
 
 	outPath := layout.MergedPath(c.workdir)
+	if err := layout.EnsurePath(outPath); err != nil {
+		return err
+	}
 	if err := writeNodesJSONL(outPath, nodes); err != nil {
 		return err
 	}
@@ -370,16 +379,20 @@ func cmdProbe(ctx context.Context, args []string) error {
 		return err
 	}
 
-	alive, dead := 0, 0
+	counts := map[string]int{}
 	for _, r := range results {
-		if r.OK {
-			alive++
-		} else {
-			dead++
+		status := r.Status
+		if status == "" {
+			// Запись без статуса возможна только у старых результатов;
+			// здесь её источник — тот же прогон, поэтому fallback.
+			status = probe.StatusDead
 		}
+		counts[status]++
 	}
-	fmt.Printf("http probe via %s: alive=%d dead=%d\n", *core, alive, dead)
-	if alive == 0 && dead > 0 {
+	fmt.Printf("http probe via %s: alive=%d throttled=%d forbidden=%d dead=%d\n",
+		*core, counts[probe.StatusAlive], counts[probe.StatusThrottled],
+		counts[probe.StatusForbidden], counts[probe.StatusDead])
+	if counts[probe.StatusAlive] == 0 && len(results) > 0 {
 		return fmt.Errorf("no node answered through the core")
 	}
 	return nil
@@ -388,7 +401,8 @@ func cmdProbe(ctx context.Context, args []string) error {
 func cmdExport(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ExitOnError)
 	cb := bindCommon(fs)
-	target := fs.String("target", "all", "clash|best|all")
+	target := fs.String("target", "all", "merged|sorted|all")
+	keepPools := fs.Int("keep-pools", 1, "max nodes kept per server:port pool (0 = no dedup)")
 	c, err := cb.parse(fs, args)
 	if err != nil {
 		return err
@@ -398,14 +412,20 @@ func cmdExport(_ context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("run merge first: %w", err)
 	}
+	before := len(nodes)
 	nodes = attachDelays(c.workdir, nodes)
+	nodes = dedupeByPool(nodes, *keepPools)
+	if *keepPools > 0 {
+		fmt.Fprintf(os.Stderr, "  pools: %d nodes -> %d (keep %d per server:port)\n",
+			before, len(nodes), *keepPools)
+	}
 
-	targets := []string{"clash", "best"}
+	targets := []string{"merged", "sorted"}
 	if *target != "all" {
 		targets = strings.Split(*target, ",")
 	}
 
-	paths, err := emit.WriteAll(layout.ProfilesDirPath(c.workdir), nodes, targets)
+	paths, err := emit.WriteAll(layout.ClashDirPath(c.workdir), nodes, targets)
 	if err != nil {
 		return err
 	}
@@ -421,7 +441,7 @@ func cmdExport(_ context.Context, args []string) error {
 //
 // Узел считается живым, только если HTTP-запрос прошёл И TCP-этап до него
 // тоже дал коннект. Без второй проверки мёртвый узел с refused-портом
-// попадал в best.yaml: проба ходит через ядро, и при неверно выбранном
+// попадал в sorted.yaml: проба ходит через ядро, и при неверно выбранном
 // маршруте запрос отвечает 2xx напрямую, а задержка принадлежит каналу
 // хоста, а не узлу.
 func attachDelays(workdir string, nodes []model.Node) []model.Node {
@@ -431,25 +451,123 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 	}
 	reachable, hasTCP := tcpReachable(workdir)
 
-	delays := map[string]float64{}
+	type verdict struct {
+		delay  float64
+		status string
+	}
+	verdicts := map[string]verdict{}
 	for _, r := range results {
-		if !r.OK {
+		if r.OK {
+			if hasTCP && !reachable[r.ID] {
+				continue
+			}
+			verdicts[r.ID] = verdict{delay: r.DelayMs, status: probe.StatusAlive}
 			continue
 		}
-		if hasTCP && !reachable[r.ID] {
-			continue
+		// 429 и 403 — это ответ цели, а не обрыв. Задержка у них измерена,
+		// и статус нужен экспортёру, чтобы пул с исчерпанной квотой выпал
+		// целиком, а не притворился живым.
+		if r.Status == probe.StatusThrottled || r.Status == probe.StatusForbidden {
+			verdicts[r.ID] = verdict{delay: r.DelayMs, status: r.Status}
 		}
-		delays[r.ID] = r.DelayMs
 	}
 	for i := range nodes {
-		if d, ok := delays[nodes[i].ID]; ok {
-			if nodes[i].Raw == nil {
-				nodes[i].Raw = map[string]any{}
-			}
-			nodes[i].Raw["delay_ms"] = d
+		v, ok := verdicts[nodes[i].ID]
+		if !ok {
+			continue
 		}
+		if nodes[i].Raw == nil {
+			nodes[i].Raw = map[string]any{}
+		}
+		nodes[i].Raw["delay_ms"] = v.delay
+		nodes[i].Raw["status"] = v.status
 	}
 	return nodes
+}
+
+// dedupeByPool оставляет в профиле не больше keep лучших узлов на пул
+// server:port.
+//
+// Сервисы обычно считают квоту на пул: 48 записей с одним server:port —
+// это один лимит, и в профиле им делать нечего. Победитель группы — самый
+// быстрый живой узел; если на пуле есть узел со статусом throttled или
+// forbidden, пул выбрасывается целиком, потому что лимит общий, и
+// «быстрый» узел того же пула сгорит вместе с ним.
+//
+// keep=0 отключает дедуп. keep<1 при включённом дедупе приводится к 1.
+func dedupeByPool(nodes []model.Node, keep int) []model.Node {
+	if keep < 0 {
+		keep = 0
+	}
+	if keep == 0 {
+		return nodes
+	}
+
+	poolOf := func(n model.Node) string {
+		return probe.PoolKey(n.Server, n.Port)
+	}
+	statusOf := func(n model.Node) string {
+		if n.Raw == nil {
+			return ""
+		}
+		s, _ := n.Raw["status"].(string)
+		return s
+	}
+	delayOf := func(n model.Node) float64 {
+		if n.Raw == nil {
+			return 1 << 30
+		}
+		if d, ok := n.Raw["delay_ms"].(float64); ok && d > 0 {
+			return d
+		}
+		return 1 << 30
+	}
+
+	// Порядок первого появления пула сохраняется: профиль не должен
+	// перетасовываться от прогона к прогону без причины.
+	var order []string
+	groups := map[string][]model.Node{}
+	for _, n := range nodes {
+		key := poolOf(n)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], n)
+	}
+
+	out := make([]model.Node, 0, len(order))
+	for _, key := range order {
+		members := groups[key]
+		dirty := false
+		for _, m := range members {
+			switch statusOf(m) {
+			case probe.StatusThrottled, probe.StatusForbidden:
+				dirty = true
+			}
+		}
+		if dirty {
+			continue
+		}
+
+		var alive []model.Node
+		for _, m := range members {
+			if statusOf(m) == probe.StatusAlive {
+				alive = append(alive, m)
+			}
+		}
+		// Пул без статусов (старые результаты без поля status) не трогаем:
+		// иначе экспорт после обновления начнёт молча терять узлы.
+		if len(alive) == 0 && len(members) > 0 {
+			out = append(out, members...)
+			continue
+		}
+		sort.SliceStable(alive, func(i, j int) bool { return delayOf(alive[i]) < delayOf(alive[j]) })
+		if len(alive) > keep {
+			alive = alive[:keep]
+		}
+		out = append(out, alive...)
+	}
+	return out
 }
 
 // tcpReachable читает tcp.jsonl и возвращает узлы с открытым портом.
@@ -477,12 +595,12 @@ func cmdAll(ctx context.Context, args []string) error {
 		own  []string // флаги, объявленные только этой подкомандой
 	}
 	steps := []step{
-		{"fetch", cmdFetch, []string{"refresh"}},
+		{"fetch", cmdFetch, []string{"refresh", "attempts"}},
 		{"parse", cmdParse, []string{"source"}},
 		{"merge", cmdMerge, nil},
 		{"ping", cmdPing, []string{"concurrency", "timeout"}},
 		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency"}},
-		{"export", cmdExport, []string{"target"}},
+		{"export", cmdExport, []string{"target", "keep-pools"}},
 	}
 
 	allStarted := time.Now()

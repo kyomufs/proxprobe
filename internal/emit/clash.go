@@ -18,7 +18,18 @@ import (
 	"github.com/kyomufs/proxprobe/internal/model"
 )
 
+// Имена выходных файлов. Лежат рядом, чтобы имя в switch и подпись в
+// документации не разъезжались.
+const (
+	MergedClashName = "merged.yaml"
+	SortedClashName = "sorted.yaml"
+)
+
 // WriteAll пишет все запрошенные форматы в каталог dir.
+//
+// Цели называются по смыслу, а не по имени файла: merged — все узлы,
+// sorted — только живые по возрастанию задержки. Файлы — merged.yaml и
+// sorted.yaml соответственно.
 func WriteAll(dir string, nodes []model.Node, targets []string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("emit: cannot create %s: %w", dir, err)
@@ -32,14 +43,14 @@ func WriteAll(dir string, nodes []model.Node, targets []string) ([]string, error
 			err  error
 		)
 		switch target {
-		case "clash":
-			name = "clash.yaml"
+		case "merged":
+			name = MergedClashName
 			body, err = Clash(nodes)
-		case "best":
-			name = "best.yaml"
-			body, err = Best(nodes)
+		case "sorted":
+			name = SortedClashName
+			body, err = Sorted(nodes)
 		default:
-			return written, fmt.Errorf("emit: unknown target %q (supported: clash, best)", target)
+			return written, fmt.Errorf("emit: unknown target %q (supported: merged, sorted)", target)
 		}
 		if err != nil {
 			return written, fmt.Errorf("emit %s: %w", target, err)
@@ -71,15 +82,31 @@ func Clash(nodes []model.Node) ([]byte, error) {
 	return buildClash(nodes)
 }
 
-// Best генерирует профиль только из узлов, прошедших проверку, по
+// Sorted генерирует профиль только из узлов, прошедших проверку, по
 // возрастанию задержки.
-func Best(nodes []model.Node) ([]byte, error) {
+//
+// Отбор идёт по статусу, а не по «delay_ms > 0»: у узла со статусом
+// throttled задержка тоже измерена (цель ответила 429), и по старому
+// условию он попал бы в профиль как живой. Статус различает «годен» и
+// «ответил, но не пускает».
+func Sorted(nodes []model.Node) ([]byte, error) {
 	alive := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if n.Raw != nil {
-			if d, ok := n.Raw["delay_ms"].(float64); ok && d > 0 {
+		if n.Raw == nil {
+			continue
+		}
+		status, hasStatus := n.Raw["status"].(string)
+		if hasStatus {
+			if status == model.StatusAlive {
 				alive = append(alive, n)
 			}
+			continue
+		}
+		// Результаты старых прогонов поля status не имеют: для них
+		// сохраняется прежнее условие по задержке, иначе обновление
+		// утилиты опустошило бы профиль.
+		if d, ok := n.Raw["delay_ms"].(float64); ok && d > 0 {
+			alive = append(alive, n)
 		}
 	}
 	sort.SliceStable(alive, func(i, j int) bool {
@@ -130,7 +157,7 @@ func buildClash(nodes []model.Node) ([]byte, error) {
 		byCountry[country] = append(byCountry[country], name)
 	}
 
-	// Пустой профиль — не ошибка: best.yaml после прогона без живых узлов
+	// Пустой профиль — не ошибка: sorted.yaml после прогона без живых узлов
 	// должен остаться файлом, который клиент примет, а не исчезнуть с
 	// ошибкой экспорта. Ядро принимает конфиг с DIRECT/REJECT в группе.
 	if len(names) == 0 {
@@ -143,10 +170,10 @@ func buildClash(nodes []model.Node) ([]byte, error) {
 	}
 
 	doc.ProxyGroups = append(doc.ProxyGroups, map[string]any{
-		"name":    "AUTO",
-		"type":    "url-test",
-		"proxies": names,
-		"url":     "https://www.gstatic.com/generate_204",
+		"name":      "AUTO",
+		"type":      "url-test",
+		"proxies":   names,
+		"url":       "https://www.gstatic.com/generate_204",
 		"interval":  300,
 		"tolerance": 50,
 	})
@@ -162,10 +189,10 @@ func buildClash(nodes []model.Node) ([]byte, error) {
 			continue
 		}
 		doc.ProxyGroups = append(doc.ProxyGroups, map[string]any{
-			"name":    country,
-			"type":    "url-test",
-			"proxies": members,
-			"url":     "https://www.gstatic.com/generate_204",
+			"name":      country,
+			"type":      "url-test",
+			"proxies":   members,
+			"url":       "https://www.gstatic.com/generate_204",
 			"interval":  300,
 			"tolerance": 50,
 		})

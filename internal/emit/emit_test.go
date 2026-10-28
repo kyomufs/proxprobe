@@ -133,14 +133,14 @@ func TestClashUsesRawWhenPresent(t *testing.T) {
 	}
 }
 
-func TestBestFiltersDeadNodes(t *testing.T) {
+func TestSortedFiltersDeadNodes(t *testing.T) {
 	nodes := sampleNodes(t)
 	nodes[0].Raw = map[string]any{"delay_ms": 120.0}
 	nodes[1].Raw = map[string]any{"delay_ms": 0.0} // не прошёл проверку
 
-	body, err := Best(nodes)
+	body, err := Sorted(nodes)
 	if err != nil {
-		t.Fatalf("Best() returned error: %v", err)
+		t.Fatalf("Sorted() returned error: %v", err)
 	}
 	var doc struct {
 		Proxies []map[string]any `yaml:"proxies"`
@@ -149,21 +149,21 @@ func TestBestFiltersDeadNodes(t *testing.T) {
 		t.Fatalf("generated YAML does not parse: %v", err)
 	}
 	if len(doc.Proxies) != 1 {
-		t.Fatalf("best profile has %d proxies, want only the live one", len(doc.Proxies))
+		t.Fatalf("sorted profile has %d proxies, want only the live one", len(doc.Proxies))
 	}
 	if doc.Proxies[0]["name"] != "NL TURBO 1" {
 		t.Errorf("wrong node kept: %v", doc.Proxies[0]["name"])
 	}
 }
 
-func TestBestSortsByDelay(t *testing.T) {
+func TestSortedSortsByDelay(t *testing.T) {
 	nodes := sampleNodes(t)
 	nodes[0].Raw = map[string]any{"delay_ms": 400.0}
 	nodes[1].Raw = map[string]any{"delay_ms": 90.0}
 
-	body, err := Best(nodes)
+	body, err := Sorted(nodes)
 	if err != nil {
-		t.Fatalf("Best() returned error: %v", err)
+		t.Fatalf("Sorted() returned error: %v", err)
 	}
 	var doc struct {
 		Proxies []map[string]any `yaml:"proxies"`
@@ -178,7 +178,7 @@ func TestBestSortsByDelay(t *testing.T) {
 
 func TestWriteAllCreatesFiles(t *testing.T) {
 	dir := t.TempDir()
-	paths, err := WriteAll(dir, sampleNodes(t), []string{"clash", "best"})
+	paths, err := WriteAll(dir, sampleNodes(t), []string{"merged", "sorted"})
 	if err != nil {
 		t.Fatalf("WriteAll() returned error: %v", err)
 	}
@@ -289,11 +289,11 @@ func TestClashKeepsEmojiReadable(t *testing.T) {
 }
 
 func TestEmptyProfileIsValid(t *testing.T) {
-	// Пустой best.yaml после прогона без живых узлов должен остаться
+	// Пустой sorted.yaml после прогона без живых узлов должен остаться
 	// загружаемым файлом, а не ошибкой экспорта.
-	body, err := Best(nil)
+	body, err := Sorted(nil)
 	if err != nil {
-		t.Fatalf("Best(nil) returned error: %v", err)
+		t.Fatalf("Sorted(nil) returned error: %v", err)
 	}
 	var doc struct {
 		Proxies     []map[string]any `yaml:"proxies"`
@@ -311,17 +311,64 @@ func TestCountryOfSkipsServiceIcons(t *testing.T) {
 	// «🇪🇺 ⚡️ Авто | Самый быстрый» — страной должно стать «Авто», а не
 	// значок. Иначе группы называются эмодзи.
 	cases := map[string]string{
-		"🇳🇱 Нидерланды TURBO #4":            "Нидерланды",
-		"🇪🇺 ⚡️ Авто | Самый быстрый (2)":     "Авто",
-		"🇪🇺 🎮 Авто | Белые списки 💎 (14)":  "Авто",
-		"🇬🇧 Великобритания":                   "Великобритания",
-		"🇳🇱 Нидерланды · Aeza СПб":           "Нидерланды",
-		"⚡️":                                "Другое",
-		"":                                  "Другое",
+		"🇳🇱 Нидерланды TURBO #4":          "Нидерланды",
+		"🇪🇺 ⚡️ Авто | Самый быстрый (2)":  "Авто",
+		"🇪🇺 🎮 Авто | Белые списки 💎 (14)": "Авто",
+		"🇬🇧 Великобритания":               "Великобритания",
+		"🇳🇱 Нидерланды · Aeza СПб":        "Нидерланды",
+		"⚡️": "Другое",
+		"":   "Другое",
 	}
 	for name, want := range cases {
 		if got := countryOf(name); got != want {
 			t.Errorf("countryOf(%q) = %q, want %q", name, got, want)
 		}
+	}
+}
+
+func TestSortedKeepsOnlyAliveStatus(t *testing.T) {
+	// 429 — это ответ, а не обрыв: у узла есть задержка, но в профиль он
+	// попасть не должен. Старое условие «delay_ms > 0» его пропускало.
+	nodes := sampleNodes(t)
+	nodes[0].Raw = map[string]any{"delay_ms": 120.0, "status": model.StatusThrottled}
+	nodes[1].Raw = map[string]any{"delay_ms": 300.0, "status": model.StatusAlive}
+
+	body, err := Sorted(nodes)
+	if err != nil {
+		t.Fatalf("Sorted() returned error: %v", err)
+	}
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("generated YAML does not parse: %v", err)
+	}
+	if len(doc.Proxies) != 1 {
+		t.Fatalf("sorted profile has %d proxies, want only the alive one", len(doc.Proxies))
+	}
+	if doc.Proxies[0]["name"] != "SG SGP 4" {
+		t.Errorf("throttled node leaked into profile: %v", doc.Proxies[0]["name"])
+	}
+}
+
+func TestSortedKeepsStatuslessNodes(t *testing.T) {
+	// Результаты старых прогонов поля status не имеют: их отбор идёт по
+	// задержке, иначе обновление утилиты опустошило бы профиль.
+	nodes := sampleNodes(t)
+	nodes[0].Raw = map[string]any{"delay_ms": 120.0}
+	nodes[1].Raw = map[string]any{"delay_ms": 300.0}
+
+	body, err := Sorted(nodes)
+	if err != nil {
+		t.Fatalf("Sorted() returned error: %v", err)
+	}
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("generated YAML does not parse: %v", err)
+	}
+	if len(doc.Proxies) != 2 {
+		t.Fatalf("sorted profile dropped statusless nodes: %d proxies", len(doc.Proxies))
 	}
 }

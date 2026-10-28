@@ -20,6 +20,7 @@ type TCPResult struct {
 	Name       string  `json:"name"`
 	Server     string  `json:"server"`
 	Port       int     `json:"port"`
+	Pool       string  `json:"pool,omitempty"`
 	ResolvedIP string  `json:"resolved_ip,omitempty"`
 	DNSMs      float64 `json:"dns_ms,omitempty"`
 	DialMs     float64 `json:"dial_ms,omitempty"`
@@ -47,7 +48,10 @@ func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			res := TCPResult{ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port}
+			res := TCPResult{
+				ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port,
+				Pool: PoolKey(n.Server, n.Port),
+			}
 			addr := net.JoinHostPort(n.Server, fmt.Sprint(n.Port))
 
 			dnsStart := time.Now()
