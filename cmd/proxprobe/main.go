@@ -447,7 +447,9 @@ func cmdExport(_ context.Context, args []string) error {
 func attachDelays(workdir string, nodes []model.Node) []model.Node {
 	results, err := probe.ReadResults(layout.HTTPPath(workdir))
 	if err != nil {
-		return nodes
+		// HTTP-пробы не было: живость берётся из TCP, иначе sorted.yaml
+		// остаётся пустым скелетом, хотя порты открыты и замеры есть.
+		return tcpDelays(workdir, nodes)
 	}
 	reachable, hasTCP := tcpReachable(workdir)
 
@@ -481,6 +483,35 @@ func attachDelays(workdir string, nodes []model.Node) []model.Node {
 		}
 		nodes[i].Raw["delay_ms"] = v.delay
 		nodes[i].Raw["status"] = v.status
+	}
+	return nodes
+}
+
+// tcpDelays переносит TCP-замеры в Raw узлов, когда HTTP-пробы не было.
+//
+// Живым здесь считается узел с открытым портом: это ровно то, что знает
+// TCP-этап. Статус тоже ставится — StatusAlive, — иначе Sorted отбросит
+// узел по отсутствию статуса и профиль останется пустым. delay_ms берётся
+// из dial_ms: другого замера в этом режиме нет.
+func tcpDelays(workdir string, nodes []model.Node) []model.Node {
+	items, err := probe.ReadTCPResults(layout.TCPPath(workdir))
+	if err != nil {
+		return nodes
+	}
+	byID := make(map[string]probe.TCPResult, len(items))
+	for _, r := range items {
+		byID[r.ID] = r
+	}
+	for i := range nodes {
+		r, ok := byID[nodes[i].ID]
+		if !ok || !r.OK {
+			continue
+		}
+		if nodes[i].Raw == nil {
+			nodes[i].Raw = map[string]any{}
+		}
+		nodes[i].Raw["delay_ms"] = r.DialMs
+		nodes[i].Raw["status"] = model.StatusAlive
 	}
 	return nodes
 }

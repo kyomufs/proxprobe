@@ -272,6 +272,14 @@ func proxyForClash(n model.Node) (map[string]any, error) {
 	case model.ProtoHysteria2:
 		proxy["type"] = "hysteria2"
 		proxy["password"] = n.Password
+	case model.ProtoAnyTLS:
+		// anytls в mihomo требует явного клиентского отпечатка; без него
+		// ядро отвергает узел, поэтому fingerprint обязателен.
+		proxy["type"] = "anytls"
+		proxy["password"] = n.Password
+		if n.Fingerprint != "" {
+			proxy["client-fingerprint"] = n.Fingerprint
+		}
 	case model.ProtoTuic:
 		proxy["type"] = "tuic"
 		proxy["uuid"] = n.UUID
