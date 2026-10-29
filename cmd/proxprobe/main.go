@@ -712,6 +712,7 @@ func cmdAll(ctx context.Context, args []string) error {
 			fmt.Println("флаги шагов (передаются общим списком, каждый шаг берёт свои):")
 			fmt.Println("  --core --url --timeout --concurrency --mixed-port --control-port --dns")
 			fmt.Println("  --refresh --attempts --source --target --keep-pools")
+			fmt.Println("  --probe (включить шаг probe; по умолчанию он пропускается)")
 			return nil
 		}
 	}
@@ -733,7 +734,17 @@ func cmdAll(ctx context.Context, args []string) error {
 	}
 
 	allStarted := time.Now()
+	// Проба через ядро — самый долгий шаг: переключение селектора и запрос
+	// сериализованы мьютексом, и 195 узлов идут около 16 минут независимо от
+	// --concurrency. По умолчанию шаг пропускается, живость считается по
+	// TCP-этапу (export сам читает tcp.jsonl, если http.jsonl нет).
+	withProbe := hasFlag(args, "probe")
+
 	for i, st := range steps {
+		if st.name == "probe" && !withProbe {
+			fmt.Fprintf(os.Stderr, "[%d/%d] probe пропущен (--probe чтобы включить)\n", i+1, len(steps))
+			continue
+		}
 		// Прогресс в stderr: stdout каждого шага — данные, которые можно
 		// перенаправить в файл, а «шаг 2 из 6» в тот же поток их испортил бы.
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(steps), st.name)
@@ -748,8 +759,24 @@ func cmdAll(ctx context.Context, args []string) error {
 	return nil
 }
 
+// hasFlag ищет булев флаг по любому написанию: -probe, --probe или -probe=true.
+func hasFlag(args []string, name string) bool {
+	for _, arg := range args {
+		key := strings.TrimLeft(arg, "-")
+		if idx := strings.Index(key, "="); idx >= 0 {
+			if key[:idx] == name {
+				return key[idx+1:] != "false"
+			}
+			continue
+		}
+		if key == name {
+			return true
+		}
+	}
+	return false
+}
+
 // filterArgs оставляет из аргументов только те, что понятны шагу.
-//
 // Общие флаги (-config, -workdir) и флаги самого шага проходят; чужие
 // отбрасываются вместе со значением. Без этого шаг падает с
 // «flag provided but not defined» на флаге соседней подкоманды.

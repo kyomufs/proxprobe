@@ -26,3 +26,27 @@ func TestSplitTargets(t *testing.T) {
 		}
 	}
 }
+
+// TestHasFlag — пропуск шага probe включается только явным флагом: забытый
+// --probe стоит 16 минут, а лишний прогон — тех же 16 минут, поэтому
+// разбирается и «-probe», и «--probe=false».
+func TestHasFlag(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"--refresh"}, false},
+		{[]string{"--probe"}, true},
+		{[]string{"-probe"}, true},
+		{[]string{"--probe=true"}, true},
+		{[]string{"--probe=false"}, false},
+		{[]string{"--concurrency", "24", "--probe"}, true},
+		{[]string{"--probe-list"}, false},
+	}
+	for _, c := range cases {
+		if got := hasFlag(c.args, "probe"); got != c.want {
+			t.Errorf("hasFlag(%q) = %v, want %v", c.args, got, c.want)
+		}
+	}
+}
