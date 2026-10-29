@@ -101,6 +101,13 @@ proxprobe export              # → out/clash/merged.yaml, out/clash/sorted.yaml
 `all` принимает флаги своих шагов и раздаёт их по назначению — можно писать
 `proxprobe all --concurrency 24 --refresh`.
 
+Шаг `probe` самый долгий: переключение селектора и запрос сериализованы, и
+195 узлов идут около 16 минут независимо от `--concurrency`. Если нужен
+только профиль, `probe` можно не запускать — шаги вызываются по
+отдельности (`fetch`, `parse`, `merge`, `ping`, `export`), а живость в этом
+случае в `export` берётся из TCP-этапа. Так и делает `test_serve.sh`: без
+`PROBE=1` он идёт по шагам, с `PROBE=1` — через `all` с пробой.
+
 ## Подписки
 
 `sources.yaml`:
