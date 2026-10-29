@@ -314,6 +314,7 @@ func cmdPing(ctx context.Context, args []string) error {
 	cb := bindCommon(fs)
 	concurrency := fs.Int("concurrency", 200, "parallel dials")
 	timeout := fs.Duration("timeout", 2*time.Second, "dial timeout")
+	dns := fs.String("dns", "", "DNS servers for node names, comma-separated (default: 1.1.1.1,8.8.8.8)")
 	c, err := cb.parse(fs, args)
 	if err != nil {
 		return err
@@ -324,7 +325,7 @@ func cmdPing(ctx context.Context, args []string) error {
 		return fmt.Errorf("run merge first: %w", err)
 	}
 
-	results := probe.TCP(ctx, nodes, *concurrency, *timeout)
+	results := probe.TCP(ctx, nodes, *concurrency, *timeout, splitList(*dns))
 	if err := probe.WriteJSONL(layout.TCPPath(c.workdir), results); err != nil {
 		return err
 	}
@@ -348,6 +349,7 @@ func cmdProbe(ctx context.Context, args []string) error {
 	defaults := probe.Defaults()
 	mixedPort := fs.Int("mixed-port", defaults.MixedPort, "core socks/http inbound port")
 	controlPort := fs.Int("control-port", defaults.ControlPort, "core REST API port")
+	dns := fs.String("dns", "", "DNS servers for the core and node names (default: 1.1.1.1,8.8.8.8)")
 
 	if *timeout == 0 {
 		*timeout = 5 * time.Second
@@ -369,6 +371,7 @@ func cmdProbe(ctx context.Context, args []string) error {
 	cfg.Concurrency = *concurrency
 	cfg.MixedPort = *mixedPort
 	cfg.ControlPort = *controlPort
+	cfg.DNS = splitList(*dns)
 	if *testURL != "" {
 		cfg.TestURL = *testURL
 	}
@@ -400,8 +403,12 @@ func cmdProbe(ctx context.Context, args []string) error {
 	fmt.Printf("http probe via %s: alive=%d throttled=%d forbidden=%d dead=%d\n",
 		*core, counts[probe.StatusAlive], counts[probe.StatusThrottled],
 		counts[probe.StatusForbidden], counts[probe.StatusDead])
+	// Ноль живых — это результат измерения, а не сбой прогона: подписка могла
+	// умереть целиком, а merged.yaml всё равно нужен. Раньше шаг возвращал
+	// ошибку, и «all» обрывался до экспорта — наружу не уезжало НИЧЕГО, хотя
+	// профиль со всеми узлами был готов.
 	if counts[probe.StatusAlive] == 0 && len(results) > 0 {
-		return fmt.Errorf("no node answered through the core")
+		fmt.Fprintf(os.Stderr, "внимание: ни один узел не ответил через ядро — sorted.yaml останется пустым\n")
 	}
 	return nil
 }
@@ -458,14 +465,19 @@ func cmdExport(_ context.Context, args []string) error {
 // пустой элемент («merged,,sorted») раньше доезжал до WriteAll и валил экспорт
 // на «unknown target ""».
 func splitTargets(spec string) []string {
+	if out := splitList(spec); len(out) > 0 {
+		return out
+	}
+	return []string{"merged", "sorted"}
+}
+
+// splitList разбирает список через запятую, отбрасывая пустые элементы.
+func splitList(spec string) []string {
 	var out []string
 	for _, part := range strings.Split(spec, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
-	}
-	if len(out) == 0 {
-		return []string{"merged", "sorted"}
 	}
 	return out
 }
@@ -690,6 +702,20 @@ func tcpReachable(workdir string) (map[string]bool, bool) {
 }
 
 func cmdAll(ctx context.Context, args []string) error {
+	// «all -h» иначе неотличим от «all»: filterArgs выбрасывает незнакомый
+	// флаг, и вместо подсказки запускается пятнадцатиминутный прогон.
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "-help", "--help", "help":
+			fmt.Print(usage)
+			fmt.Println()
+			fmt.Println("флаги шагов (передаются общим списком, каждый шаг берёт свои):")
+			fmt.Println("  --core --url --timeout --concurrency --mixed-port --control-port --dns")
+			fmt.Println("  --refresh --attempts --source --target --keep-pools")
+			return nil
+		}
+	}
+
 	// Аргументы фильтруются по шагу: у каждой подкоманды свой набор флагов,
 	// и общий список уронил бы шаг на "flag provided but not defined".
 	type step struct {
@@ -701,8 +727,8 @@ func cmdAll(ctx context.Context, args []string) error {
 		{"fetch", cmdFetch, []string{"refresh", "attempts"}},
 		{"parse", cmdParse, []string{"source"}},
 		{"merge", cmdMerge, nil},
-		{"ping", cmdPing, []string{"concurrency", "timeout"}},
-		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency", "mixed-port", "control-port"}},
+		{"ping", cmdPing, []string{"concurrency", "timeout", "dns"}},
+		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency", "mixed-port", "control-port", "dns"}},
 		{"export", cmdExport, []string{"target", "keep-pools"}},
 	}
 

@@ -28,6 +28,9 @@ type MihomoConfig struct {
 	TestURL     string
 	Timeout     time.Duration
 	Concurrency int
+	// DNS — серверы, которыми ядро резолвит имена узлов и цели запроса.
+	// Пусто — DefaultDNS.
+	DNS []string
 	// Progress вызывается периодически с числом проверенных узлов батча.
 	// Нужен, чтобы долгий прогон не выглядел зависанием.
 	Progress func(done, total int)
@@ -35,6 +38,15 @@ type MihomoConfig struct {
 
 // progress — колбэк текущего запуска.
 var progress func(done, total int)
+
+// DefaultDNS — серверы по умолчанию для ядра и TCP-проверки.
+//
+// Системный резолвер здесь не годится: на машине с TUN-клиентом (mihomo,
+// FlClash, sing-box) он отдаёт fake-IP из 198.18.0.0/15. Ядро тогда честно
+// соединяется с 198.18.x через чужой туннель, и замер принадлежит каналу
+// хоста, а не узлу — либо узел вообще не может открыть такой адрес, и все
+// узлы разом выглядят мёртвыми.
+var DefaultDNS = []string{"1.1.1.1", "8.8.8.8"}
 
 // Defaults возвращает параметры по умолчанию.
 func Defaults() MihomoConfig {
@@ -44,6 +56,7 @@ func Defaults() MihomoConfig {
 		TestURL:     "https://www.gstatic.com/generate_204",
 		Timeout:     5 * time.Second,
 		Concurrency: 8,
+		DNS:         DefaultDNS,
 	}
 }
 
@@ -63,7 +76,11 @@ func FindCore(name string) (string, error) {
 	return path, nil
 }
 
-// mihomoDoc — тестовый конфиг ядра: только прокси и API, без правил и DNS.
+// mihomoDoc — тестовый конфиг ядра: прокси, API и явный DNS.
+//
+// DNS задаётся не для красоты: без блока ядро берёт системный резолвер, а тот
+// под TUN-клиентом отдаёт fake-IP (см. DefaultDNS), и вся проба меряет чужой
+// туннель.
 type mihomoDoc struct {
 	MixedPort          int              `yaml:"mixed-port"`
 	AllowLan           bool             `yaml:"allow-lan"`
@@ -72,9 +89,36 @@ type mihomoDoc struct {
 	ExternalController string           `yaml:"external-controller"`
 	UnifiedDelay       bool             `yaml:"unified-delay"`
 	TCPConcurrent      bool             `yaml:"tcp-concurrent"`
+	DNS                mihomoDNS        `yaml:"dns"`
 	Proxies            []map[string]any `yaml:"proxies"`
 	ProxyGroups        []map[string]any `yaml:"proxy-groups"`
 	Rules              []string         `yaml:"rules"`
+}
+
+// mihomoDNS — блок DNS ядра.
+//
+// enhanced-mode: normal, а не fake-ip: имена узлов и цели должны разрешаться
+// в настоящие адреса, иначе запрос уходит на подставной адрес чужого TUN.
+type mihomoDNS struct {
+	Enable            bool     `yaml:"enable"`
+	IPv6              bool     `yaml:"ipv6"`
+	EnhancedMode      string   `yaml:"enhanced-mode"`
+	Nameserver        []string `yaml:"nameserver"`
+	DefaultNameserver []string `yaml:"default-nameserver"`
+}
+
+// dnsBlock собирает блок DNS из списка серверов; пустой список — DefaultDNS.
+func dnsBlock(servers []string) mihomoDNS {
+	if len(servers) == 0 {
+		servers = DefaultDNS
+	}
+	return mihomoDNS{
+		Enable:            true,
+		IPv6:              false,
+		EnhancedMode:      "normal",
+		Nameserver:        servers,
+		DefaultNameserver: servers,
+	}
 }
 
 // BatchSize — сколько узлов отдаётся ядру за один запуск.
@@ -313,6 +357,7 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) (map[s
 		ExternalController: fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort),
 		UnifiedDelay:       true,
 		TCPConcurrent:      true,
+		DNS:                dnsBlock(cfg.DNS),
 		Proxies:            make([]map[string]any, 0, len(nodes)),
 		Rules:              []string{"MATCH," + ProbeGroup},
 	}

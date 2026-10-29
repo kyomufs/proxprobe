@@ -38,10 +38,15 @@ type TCPResult struct {
 // Сначала отдельно замеряется резолв: у публичных подписок заметная часть
 // узлов отваливается именно на нём, и в отчёте это должно быть видно, а не
 // выглядеть как «порт закрыт».
-func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.Duration) []TCPResult {
+//
+// Имена резолвятся на заданных серверах, а не системным резолвером: под
+// TUN-клиентом тот отдаёт fake-IP, и тогда «живой» порт принадлежит чужому
+// туннелю (см. DefaultDNS).
+func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.Duration, dns []string) []TCPResult {
 	if concurrency <= 0 {
 		concurrency = 100
 	}
+	resolver := resolverFor(dns)
 	results := make([]TCPResult, len(nodes))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -60,7 +65,7 @@ func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.
 			addr := net.JoinHostPort(n.Server, fmt.Sprint(n.Port))
 
 			dnsStart := time.Now()
-			ips, err := net.DefaultResolver.LookupHost(ctx, n.Server)
+			ips, err := resolver.LookupHost(ctx, n.Server)
 			res.DNSMs = msSince(dnsStart)
 			if err != nil {
 				res.Error = "dns: " + err.Error()
@@ -69,6 +74,13 @@ func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.
 			}
 			if len(ips) > 0 {
 				res.ResolvedIP = ips[0]
+			}
+			// fake-IP не адрес узла, а метка чужого TUN: соединение по нему
+			// поднимет туннель хоста, и «порт открыт» будет неправдой.
+			if ip := net.ParseIP(res.ResolvedIP); ip != nil && fakeIPNet.Contains(ip) {
+				res.Error = "dns: fake-ip " + res.ResolvedIP + " (TUN-клиент на машине, резолв мимо fake-ip)"
+				results[i] = res
+				return
 			}
 
 			dialStart := time.Now()
@@ -90,6 +102,34 @@ func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.
 
 func msSince(t time.Time) float64 {
 	return float64(time.Since(t).Microseconds()) / 1000.0
+}
+
+// fakeIPNet — диапазон fake-IP у mihomo и его форков (FlClash, Clash Verge).
+var fakeIPNet = &net.IPNet{IP: net.IPv4(198, 18, 0, 0), Mask: net.CIDRMask(15, 32)}
+
+// resolverFor строит резолвер на явных серверах.
+//
+// Пустой список оставляет системный резолвер: другого источника имён нет, и
+// лучше показать его ошибку, чем не проверять узлы вовсе.
+func resolverFor(servers []string) *net.Resolver {
+	if len(servers) == 0 {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var lastErr error
+			for _, server := range servers {
+				d := net.Dialer{Timeout: 3 * time.Second}
+				conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(server, "53"))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
 }
 
 // WriteJSONL пишет результаты по строке на узел: формат читается глазами и
