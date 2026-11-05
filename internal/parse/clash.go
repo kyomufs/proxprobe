@@ -217,13 +217,32 @@ func extractProxiesBlock(body []byte) []byte {
 	return out.Bytes()
 }
 
+// clashGroupTypes — типы, которые в Clash-совместимом YAML описывают ГРУППУ,
+// а не сервер. Иногда они лежат прямо в proxies:, и разбирать их как узлы
+// нельзя: у группы нет ни адреса, ни учётных данных — только список имён.
+//
+// Список держится здесь, а не рядом с разбором узла, потому что это словарь
+// формата, и он же нужен проверке в clashProxyToNode.
+var clashGroupTypes = map[string]bool{
+	"select": true, "url-test": true, "fallback": true,
+	"load-balance": true, "relay": true,
+}
+
 func clashProxyToNode(p clashProxy) (*model.Node, error) {
+	// Группы (url-test, select, fallback…) иногда лежат прямо в proxies:.
+	// Это не серверы: у них нет ни учётных данных, ни собственного адреса.
+	if clashGroupTypes[p.Type] {
+		return nil, fmt.Errorf("clash: %q is a proxy group, not a server", p.Type)
+	}
 	port, err := p.port()
 	if err != nil {
 		return nil, err
 	}
 	if p.Server == "" {
 		return nil, fmt.Errorf("clash: %q has no server", p.Name)
+	}
+	if err := checkEndpoint(p.Server); err != nil {
+		return nil, fmt.Errorf("clash: %q: %w", p.Name, err)
 	}
 
 	n := &model.Node{

@@ -83,8 +83,22 @@ func TCP(ctx context.Context, nodes []model.Node, concurrency int, timeout time.
 				return
 			}
 
+			// Диал идёт по ЗАМЕРЕННОМУ адресу, а не по имени.
+			//
+			// Под TUN-клиентом (FlClash, Clash Verge, mihomo) соединение по
+			// имени перехватывается хостом: замер получается в единицы
+			// миллисекунд и принадлежит туннелю машины, а не узлу. Именно
+			// так выглядел прогон 2026-11-05: узлы с реальным адресом
+			// показали 0.087 мс, то есть заведомо не сетевую задержку.
+			// Адрес уже получен выше своим резолвером, и он же проверен на
+			// fake-IP — диал по нему и есть измерение узла.
+			dialAddr := addr
+			if ip := net.ParseIP(res.ResolvedIP); ip != nil {
+				dialAddr = net.JoinHostPort(res.ResolvedIP, fmt.Sprint(n.Port))
+			}
+
 			dialStart := time.Now()
-			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", addr)
+			conn, err := (&net.Dialer{Timeout: timeout}).DialContext(ctx, "tcp", dialAddr)
 			res.DialMs = msSince(dialStart)
 			if err != nil {
 				res.Error = "dial: " + err.Error()
