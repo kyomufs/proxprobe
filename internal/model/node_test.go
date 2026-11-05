@@ -112,3 +112,42 @@ func TestParseEndpoint(t *testing.T) {
 		t.Error("ParseEndpoint accepted an endpoint without a port")
 	}
 }
+
+func TestComputeIDIgnoresSNI(t *testing.T) {
+	// SNI — это маскировка TLS, а не адрес сервера. Один и тот же
+	// server:port с одним и тем же ключом reality, но разными SNI —
+	// один узел; иначе подписка размножает его десятками.
+	a := Node{Proto: ProtoVLESS, Server: "ru-bridge03.example.com", Port: 443, UUID: "u",
+		Network: NetTCP, Security: SecReality, PublicKey: "PBK", ShortID: "SID", SNI: "one.example.com"}
+	a.Finalize()
+	b := Node{Proto: ProtoVLESS, Server: "ru-bridge03.example.com", Port: 443, UUID: "u",
+		Network: NetTCP, Security: SecReality, PublicKey: "PBK", ShortID: "SID", SNI: "two.example.com"}
+	b.Finalize()
+
+	if a.ID != b.ID {
+		t.Fatalf("nodes with the same endpoint but different SNI got different IDs:\n  %s\n  %s", a.ID, b.ID)
+	}
+}
+
+func TestFinalizeStripsTelegramArtifacts(t *testing.T) {
+	tests := map[string]string{
+		"🇮🇳  @v2ray313 کانالمون": "🇮🇳",
+		"🇺🇸 US-1 | @channel":     "🇺🇸 US-1",
+		"Tel-@Alpha_V2rayip😓 2":  "",
+		"https://t.me/VPNgoma":   "",
+		"🇩🇪All⁹":                "🇩🇪All⁹",
+	}
+	for in, want := range tests {
+		n := Node{Proto: ProtoVLESS, Server: "example.com", Port: 443, UUID: "u", Name: in}
+		n.Finalize()
+		if want == "" {
+			if n.Name == "" || n.Name == in {
+				t.Errorf("Finalize(%q) left an ad name %q, want a generated fallback", in, n.Name)
+			}
+			continue
+		}
+		if n.Name != want {
+			t.Errorf("Finalize(%q) name = %q, want %q", in, n.Name, want)
+		}
+	}
+}

@@ -3,14 +3,18 @@ package probe
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,7 +26,6 @@ import (
 // MihomoConfig — параметры запуска ядра для проверки.
 type MihomoConfig struct {
 	CorePath    string
-	WorkDir     string
 	MixedPort   int
 	ControlPort int
 	TestURL     string
@@ -32,20 +35,15 @@ type MihomoConfig struct {
 	// Пусто — DefaultDNS.
 	DNS []string
 	// Progress вызывается периодически с числом проверенных узлов батча.
-	// Нужен, чтобы долгий прогон не выглядел зависанием.
 	Progress func(done, total int)
 }
-
-// progress — колбэк текущего запуска.
-var progress func(done, total int)
 
 // DefaultDNS — серверы по умолчанию для ядра и TCP-проверки.
 //
 // Системный резолвер здесь не годится: на машине с TUN-клиентом (mihomo,
 // FlClash, sing-box) он отдаёт fake-IP из 198.18.0.0/15. Ядро тогда честно
 // соединяется с 198.18.x через чужой туннель, и замер принадлежит каналу
-// хоста, а не узлу — либо узел вообще не может открыть такой адрес, и все
-// узлы разом выглядят мёртвыми.
+// хоста, а не узлу.
 var DefaultDNS = []string{"1.1.1.1", "8.8.8.8"}
 
 // Defaults возвращает параметры по умолчанию.
@@ -54,16 +52,16 @@ func Defaults() MihomoConfig {
 		MixedPort:   17890,
 		ControlPort: 19090,
 		TestURL:     "https://www.gstatic.com/generate_204",
-		Timeout:     5 * time.Second,
-		Concurrency: 8,
+		Timeout:     HTTPTimeout,
+		Concurrency: HTTPJobs,
 		DNS:         DefaultDNS,
 	}
 }
 
 // FindCore ищет бинарь ядра в PATH.
 //
-// Отдельная функция, потому что ошибка «ядро не найдено» должна
-// объяснять, что включить, а не выглядеть как ошибка запуска процесса.
+// Отдельная функция, потому что ошибка «ядро не найдено» должна объяснять,
+// что включить, а не выглядеть как ошибка запуска процесса.
 func FindCore(name string) (string, error) {
 	if name == "" {
 		name = "mihomo"
@@ -91,7 +89,6 @@ type mihomoDoc struct {
 	TCPConcurrent      bool             `yaml:"tcp-concurrent"`
 	DNS                mihomoDNS        `yaml:"dns"`
 	Proxies            []map[string]any `yaml:"proxies"`
-	ProxyGroups        []map[string]any `yaml:"proxy-groups"`
 	Rules              []string         `yaml:"rules"`
 }
 
@@ -130,19 +127,23 @@ const BatchSize = 500
 
 // Mihomo прогоняет узлы через реальный туннель.
 //
-// Ядро поднимается ОДИН раз на батч: запускать процесс на каждый узел
-// слишком дорого (на 400 узлах это 400 форков). Живость определяется
-// встроенным в ядро замером задержки через REST API.
+// Живость определяется встроенным в ядро замером: GET /proxies/{name}/delay
+// поднимает соединение через конкретный узел и возвращает RTT. Замеры
+// независимы, поэтому идут параллельно — в отличие от переключения
+// селектора, где узлы пришлось бы проверять по одному.
 func Mihomo(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result, error) {
-	progress = cfg.Progress
+	if cfg.Concurrency <= 0 {
+		cfg.Concurrency = HTTPJobs
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = HTTPTimeout
+	}
+
 	var all []Result
 	var lastErr error
 
 	for start := 0; start < len(nodes); start += BatchSize {
-		end := start + BatchSize
-		if end > len(nodes) {
-			end = len(nodes)
-		}
+		end := min(start+BatchSize, len(nodes))
 		if err := ctx.Err(); err != nil {
 			return all, err
 		}
@@ -152,13 +153,11 @@ func Mihomo(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]Result
 			// Ошибки окружения (ядро не найдено, порты заняты чужим
 			// процессом) — не «плохие узлы», а невозможность проверить
 			// хоть один. Если их проглотить, прогон вернёт тысячу
-			// batch-failed и выглядит как «все узлы мёртвы», хотя дело было
-			// в занятом порту. Поэтому такие ошибки останавливают прогон.
+			// batch-failed и выглядит как «все узлы мертвы», хотя дело было
+			// в занятом порту.
 			if isSetupError(err) {
 				return nil, err
 			}
-			// Один батч не должен ронять прогон: помечаем его узлы как
-			// непроверенные и идём дальше.
 			lastErr = err
 			for _, n := range nodes[start:end] {
 				all = append(all, Result{
@@ -214,7 +213,7 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 		}
 		unsupported = append(unsupported, Result{
 			ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto,
-			OK: false, Error: "unsupported-by-core: " + reason,
+			Error: "unsupported-by-core: " + reason,
 		})
 	}
 	if len(supported) == 0 {
@@ -234,8 +233,7 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 
 	// Порты проверяются ДО старта. Если их держит чужое ядро (параллельный
 	// прогон, живой клиент), наш процесс поднимется без инбаунда, а проба
-	// будет мерить чужой конфиг: REST API чужого ядра ответит, mixed-port
-	// чужого ядра примет запрос, и вердикты будут по чужим узлам.
+	// будет ходить через чужое ядро и мерить чужие узлы.
 	if err := portsFree(cfg); err != nil {
 		return nil, err
 	}
@@ -245,12 +243,10 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 	if err != nil {
 		return nil, err
 	}
-	// Узлы, которым ядро не может дать запись, не теряются: они попадают в
-	// результат о непроверенными и видны в счётчиках отчёта.
 	for _, n := range skipped {
 		unsupported = append(unsupported, Result{
 			ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto,
-			OK: false, Error: "unsupported-by-core: core cannot represent this node",
+			Error: "unsupported-by-core: core cannot represent this node",
 		})
 	}
 
@@ -272,16 +268,7 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 		return nil, err
 	}
 
-	// Порты должны принадлежать ИМЕННО этому ядру.
-	//
-	// Простой «кто-то слушает» не ловит случай: если порт уже занят чужим
-	// ядром (параллельный прогон, живой клиент), чужой слушатель обнаружен,
-	// а наш процесс пишет в лог "bind: address already in use" и остаётся
-	// жив без инбаунда. Проба тогда мерит чужой конфиг и выдаёт вердикты по
-	// чужим узлам. Поэтому порты занимаются ДО старта процесса.
-	// Каждый узел идёт через селектор к ядру, который переключается на него
-	// перед запросом. Полагаться на режим global нельзя, см. writeMihomoConfig.
-	checked := sockProbe(ctx, supported, cfg, base, coreNames)
+	checked := delayProbe(ctx, supported, cfg, base, coreNames)
 	return append(checked, unsupported...), nil
 }
 
@@ -289,17 +276,8 @@ func mihomoBatch(ctx context.Context, nodes []model.Node, cfg MihomoConfig) ([]R
 //
 // Занятый порт означает, что поднимется не наш стек: ядро останется без
 // инбаунда, а проба будет ходить через чужое ядро и мерить чужие узлы.
-//
-// Проверка идёт через Listen, а не через Dial: «connect не отдал
-// ECONNREFUSED» — это не признак свободы порта, а признак того, что на нём
-// кто-то есть. Свободный порт как раз отвечает отказом, поэтому прежняя
-// проверка пропускала занятость насквозь (при медленном слушателе или
-// SO_REUSEADDR) и проба мерила чужой конфиг.
-//
-// Освобождение портов берётся явно, ДО старта ядра. Это окно гонки: между
-// Close и стартом ядра порт теоретически может занять кто-то ещё, но
-// закрыть его полностью нельзя без передачи сокета ядру, а цена ошибки в
-// этом окне — та же, что была раньше всегда.
+// Проверка идёт через Listen: свободный порт как раз отвечает отказом, а
+// «connect не отдал ECONNREFUSED» занятость не доказывает.
 func portsFree(cfg MihomoConfig) error {
 	for _, p := range []struct {
 		port int
@@ -318,40 +296,23 @@ func portsFree(cfg MihomoConfig) error {
 	return nil
 }
 
-// ProbeGroup — имя селектора, через который идут проверочные запросы.
-// Конфиг ядра и код пробы ссылаются на него по имени, поэтому оно в одном
-// месте.
-const ProbeGroup = "PROBE"
-
 // writeMihomoConfig генерирует тестовый конфиг и возвращает имена, под
 // которыми узлы объявлены в нём, — по ID узла, — вместе со списком узлов,
 // которым ядро не может дать запись.
 //
 // Имена узлов делаются уникальными: mihomo отвергает ВЕСЬ конфиг, если два
-// прокси названы одинаково ("is the duplicate name"), а в публичных
-// подписках повторяющиеся имена — норма (разные серверы с одинаковым
-// названием локации). Дедуп по ID здесь не помогает: это разные серверы.
+// прокси названы одинаково, а в публичных подписках повтор названий — норма
+// (разные серверы с одинаковым названием локации).
 //
-// Карта возвращается наружу, потому что проба переключает селектор по имени:
-// повторить уникализацию на её стороне — значит разойтись с конфигом на
-// первом же дубле, и тогда PUT уходит на ЧУЖОЙ узел, а вердикт и задержка
-// приписываются не тому серверу.
+// Карта возвращается наружу, потому что замер ходит в
+// /proxies/{name}/delay: повторная уникализация на стороне пробы разошлась
+// бы с конфигом на первом же дубле, и замер ушёл бы на чужой сервер.
 func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) (map[string]string, []model.Node, error) {
 	doc := mihomoDoc{
 		MixedPort: cfg.MixedPort,
 		AllowLan:  false,
-		// Режим rule с явным селектором, а НЕ global.
-		//
-		// global без proxy-groups бесполезен: ядро подставляет встроенный
-		// селектор GLOBAL, у которого now=DIRECT, и весь проверочный трафик
-		// уходит напрямую. Живость тогда не проверяется вовсе — мёртвый узел
-		// 0.0.0.0:1 отвечал 2xx за 750 мс, а RTT мерил канал хоста. В логе
-		// это видно как "using GLOBAL" вместо "dial PROBE".
-		//
-		// rule + MATCH,PROBE плохо тем, что при невыбранном узле срабатывает
-		// первый прокси селектора. Поэтому селектор не создаётся неявно:
-		// его наполняют только узлы текущего батча, а sockProbe переключает
-		// его на каждый узел перед замером.
+		// Режим rule с MATCH,DIRECT: трафик хоста сюда не идёт, а замер
+		// /delay обращается к узлу напрямую и от правил не зависит.
 		Mode:               "rule",
 		LogLevel:           "warning",
 		ExternalController: fmt.Sprintf("127.0.0.1:%d", cfg.ControlPort),
@@ -359,40 +320,29 @@ func writeMihomoConfig(path string, nodes []model.Node, cfg MihomoConfig) (map[s
 		TCPConcurrent:      true,
 		DNS:                dnsBlock(cfg.DNS),
 		Proxies:            make([]map[string]any, 0, len(nodes)),
-		Rules:              []string{"MATCH," + ProbeGroup},
+		Rules:              []string{"MATCH,DIRECT"},
 	}
 
 	used := map[string]int{}
-	names := make([]string, 0, len(nodes))
 	byID := make(map[string]string, len(nodes))
 	var skipped []model.Node
 	for _, n := range nodes {
 		proxy, err := proxyForCore(n)
 		if err != nil {
-			// Узел, который ядру отдать нельзя, раньше исчезал молча: он не
-			// попадал ни в конфиг, ни в отчёт. Теперь он возвращается
-			// вызывающей стороне как непроверенный — иначе прогон выглядит
-			// так, будто узел был проверен и оказался мёртв.
+			// Узел, который ядру отдать нельзя, не исчезает молча: он
+			// возвращается вызывающей стороне как непроверенный.
 			skipped = append(skipped, n)
 			continue
 		}
 		name := coreName(n.Name, used)
 		proxy["name"] = name
 		doc.Proxies = append(doc.Proxies, proxy)
-		names = append(names, name)
 		byID[n.ID] = name
 	}
 
-	// Группа обязана быть непустой: пустой proxies ядро не примет, а батч
-	// без единого совместимого узла до сюда не доходит.
-	if len(names) == 0 {
+	if len(byID) == 0 {
 		return nil, skipped, fmt.Errorf("probe: no core-compatible nodes to build config")
 	}
-	doc.ProxyGroups = []map[string]any{{
-		"name":    ProbeGroup,
-		"type":    "select",
-		"proxies": names,
-	}}
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -418,6 +368,99 @@ func coreName(name string, seen map[string]int) string {
 		return name
 	}
 	return fmt.Sprintf("%s #%d", name, count+1)
+}
+
+// delayProbe замеряет каждый узел через REST API ядра.
+//
+// Запросы независимы: /delay не трогает глобальное состояние ядра, поэтому
+// узлы проверяются параллельно, а не по одному.
+func delayProbe(ctx context.Context, nodes []model.Node, cfg MihomoConfig, base string, coreNames map[string]string) []Result {
+	results := make([]Result, len(nodes))
+	sem := make(chan struct{}, cfg.Concurrency)
+	var wg sync.WaitGroup
+	var done atomic.Int64
+
+	for i, n := range nodes {
+		wg.Add(1)
+		go func(i int, n model.Node) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			res := Result{ID: n.ID, Name: n.Name, Server: n.Server, Port: n.Port, Proto: n.Proto}
+			coreNodeName := coreNames[n.ID]
+			delay, err := delayOne(ctx, base, coreNodeName, cfg.TestURL, cfg.Timeout)
+			if err != nil {
+				res.Error = err.Error()
+			} else {
+				res.OK = true
+				res.DelayMs = delay
+			}
+			results[i] = res
+			done.Add(1)
+		}(i, n)
+	}
+
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if cfg.Progress != nil {
+					cfg.Progress(int(done.Load()), len(nodes))
+				}
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(stop)
+	return results
+}
+
+// delayOne просит ядро замерить узел и возвращает RTT в миллисекундах.
+//
+// Ошибка содержит текст ядра: на 504 там лежит причина (таймаут, обрыв TLS,
+// отказ цели), и она важнее кода ответа.
+func delayOne(ctx context.Context, base, name, testURL string, timeout time.Duration) (float64, error) {
+	query := url.Values{}
+	query.Set("url", testURL)
+	query.Set("timeout", fmt.Sprint(timeout.Milliseconds()))
+	endpoint := base + "/proxies/" + url.PathEscape(name) + "/delay?" + query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	client := &http.Client{Timeout: timeout + 3*time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var out struct {
+		Delay int `json:"delay"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("cannot parse delay response: %w", err)
+	}
+	if out.Delay <= 0 {
+		return 0, fmt.Errorf("no delay in response: %s", strings.TrimSpace(string(body)))
+	}
+	return float64(out.Delay), nil
 }
 
 // proxyForCore собирает запись прокси для ядра.
@@ -538,8 +581,7 @@ func stopProcess(cmd *exec.Cmd) {
 // waitForCore ждёт, пока REST API ядра ответит.
 //
 // Если ядро вышло раньше срока, ждать бессмысленно: причина уже лежит в его
-// логе — именно она объясняет, какой узел не понравился ядру. Ошибка в этом
-// случае несёт последнюю содержательную строку лога.
+// логе — именно она объясняет, какой узел не понравился ядру.
 func waitForCore(ctx context.Context, base string, timeout time.Duration, coreLog *tailBuffer) error {
 	deadline := time.Now().Add(timeout)
 	client := &http.Client{Timeout: time.Second}
@@ -565,9 +607,6 @@ func waitForCore(ctx context.Context, base string, timeout time.Duration, coreLo
 }
 
 // lastFatal достаёт последнюю строку уровня fatal/error из лога ядра.
-//
-// Ядро пишет в лог всё, включая обычный ход загрузки, поэтому нужна именно
-// строка отказа: она и есть причина, по которой конфиг не принят.
 func lastFatal(log string) string {
 	var found string
 	for _, line := range strings.Split(log, "\n") {
@@ -579,9 +618,6 @@ func lastFatal(log string) string {
 }
 
 // tailBuffer хранит последние limit байт записанного.
-//
-// Нужен для лога ядра: держать его целиком нет смысла, а последние строки —
-// это ровно то, что объясняет падение.
 type tailBuffer struct {
 	limit int
 	buf   []byte

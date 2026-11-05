@@ -72,25 +72,61 @@ func ParseLink(line string) (*model.Node, error) {
 	if !ok {
 		return nil, fmt.Errorf("not a share link")
 	}
+	var (
+		node *model.Node
+		err  error
+	)
 	switch strings.ToLower(scheme) {
 	case "vless":
-		return parseVLESS(line)
+		node, err = parseVLESS(line)
 	case "vmess":
-		return parseVMess(line)
+		node, err = parseVMess(line)
 	case "trojan":
-		return parseTrojan(line)
+		node, err = parseTrojan(line)
 	case "ss":
-		return parseSS(line)
+		node, err = parseSS(line)
 	case "socks5", "socks":
-		return parseSocks5(line)
+		node, err = parseSocks5(line)
 	case "hysteria2", "hy2":
-		return parseHysteria2(line)
+		node, err = parseHysteria2(line)
 	case "tuic":
-		return parseTuic(line)
+		node, err = parseTuic(line)
 	case "anytls":
-		return parseAnyTLS(line)
+		node, err = parseAnyTLS(line)
+	default:
+		return nil, fmt.Errorf("unsupported scheme %q", scheme)
 	}
-	return nil, fmt.Errorf("unsupported scheme %q", scheme)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkEndpoint(node.Server); err != nil {
+		return nil, err
+	}
+	return node, nil
+}
+
+// placeholderServers — адреса из шаблонов и примеров. Такой «сервер» не
+// подключается никогда и только засоряет профиль мёртвой строкой.
+var placeholderServers = map[string]bool{
+	"0.0.0.0": true, "127.0.0.1": true, "::": true, "::1": true,
+	"localhost": true, "example.com": true, "example.org": true,
+	"example.net": true,
+}
+
+// checkEndpoint отбраковывает пустые и заведомо нерабочие адреса.
+func checkEndpoint(server string) error {
+	s := strings.ToLower(strings.TrimSpace(server))
+	if s == "" {
+		return fmt.Errorf("empty server address")
+	}
+	if placeholderServers[s] {
+		return fmt.Errorf("placeholder server %q", s)
+	}
+	if strings.HasSuffix(s, ".invalid") || strings.HasSuffix(s, ".example") ||
+		strings.HasSuffix(s, ".test") {
+		return fmt.Errorf("placeholder server %q", s)
+	}
+	return nil
 }
 
 // decodeFragment превращает percent-encoded фрагмент ссылки в имя узла.

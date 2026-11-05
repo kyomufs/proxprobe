@@ -1,226 +1,166 @@
-// Package fetch скачивает подписки, не перезаписывая сырьё мусором.
+// Package fetch скачивает подписки в память.
+//
+// Файлы на диск не пишутся: узлы разбираются сразу, а исходные тела
+// сохраняются только по явному --dump-raw для разбора неудачного формата.
 package fetch
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
+	"regexp"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/kyomufs/proxprobe/internal/sources"
 )
 
-// Result — итог скачивания одного источника.
-type Result struct {
-	ID     string
-	Path   string
-	Size   int
-	SHA256 string
-	Error  error
-}
+const (
+	// DefaultUA — клиент, под который источники отдают список share-ссылок.
+	DefaultUA = "v2rayNG/1.9.16"
+	// DefaultAttempts — сколько раз пробовать один источник.
+	DefaultAttempts = 3
+	// DefaultTimeout — таймаут одной попытки.
+	DefaultTimeout = 20 * time.Second
+	// maxBody ограничивает подписку: 32 МиБ с запасом покрывают крупные
+	// сборники, а всё большее — уже не подписка.
+	maxBody = 32 << 20
+	// parallel — сколько источников качать одновременно.
+	parallel = 8
+)
 
 // Options — параметры скачивания.
 type Options struct {
-	RawDir  string
-	Timeout time.Duration
-	// Refresh перекачивает даже то, что уже лежит на диске.
-	Refresh bool
-	// Attempts — сколько раз пробовать один источник, прежде чем считать
-	// его недоступным. 0 означает DefaultAttempts.
-	//
-	// Серверы подписок рвут TLS-handshake на части запросов: тот же URL
-	// отвечает 200 и `unexpected eof while reading` через раз, и один обрыв
-	// без повтора валит весь прогон на шаге fetch. Повтор здесь дешевле,
-	// чем перезапуск конвейера вручную.
 	Attempts int
+	Timeout  time.Duration
+	DumpDir  string
 }
 
-// DefaultAttempts — сколько попыток делает fetch, если не сказано иное.
-const DefaultAttempts = 3
+// Result — итог по одному источнику. Body заполняется и при ошибке дампа.
+type Result struct {
+	Index   int
+	Source  sources.Source
+	Body    []byte
+	Err     error
+	DumpErr error
+}
 
-// retryDelay — базовая пауза между попытками; растёт линейно.
-var retryDelay = time.Second
-
-// All скачивает все источники.
+// All качает все источники параллельно, сохраняя порядок конфига.
 //
-// Скачивание идёт последовательно: источников единицы, а параллельность
-// здесь только мешает читать логи.
+// Ошибка одного источника не мешает остальным: подписки независимы, и
+// потерять из-за одной упавшей все остальные было бы хуже.
 func All(ctx context.Context, list []sources.Source, opts Options) []Result {
-	results := make([]Result, 0, len(list))
-	for _, s := range list {
-		results = append(results, One(ctx, s, opts))
+	if opts.Attempts <= 0 {
+		opts.Attempts = DefaultAttempts
 	}
-	return results
+	if opts.Timeout <= 0 {
+		opts.Timeout = DefaultTimeout
+	}
+
+	out := make([]Result, len(list))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+
+	for i, src := range list {
+		wg.Add(1)
+		go func(i int, src sources.Source) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			body, err := one(ctx, src, opts)
+			res := Result{Index: i, Source: src, Body: body, Err: err}
+			if err == nil && opts.DumpDir != "" {
+				res.DumpErr = dump(opts.DumpDir, i+1, src, body)
+			}
+			out[i] = res
+		}(i, src)
+	}
+	wg.Wait()
+	return out
 }
 
-// One скачивает один источник.
-func One(ctx context.Context, s sources.Source, opts Options) Result {
-	if err := os.MkdirAll(opts.RawDir, 0o755); err != nil {
-		return Result{ID: s.ID, Error: err}
-	}
-	path := filepath.Join(opts.RawDir, s.ID+".raw")
-
-	if !opts.Refresh {
-		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-			sum, err := fileSHA256(path)
-			// Сырьё читается только если его происхождение известно. Файл без
-			// боковой записи мог быть скачан с другими заголовками (x-hwid,
-			// UA): сервер по ним отдаёт РАЗНЫЕ узлы, а прежний кэш молча
-			// возвращал заглушку. Пропуск перезаписи здесь дешевле, чем
-			// отладка конвейера на данных, к которым применён не тот запрос.
-			if err == nil && metaMatches(metaPath(path), s) {
-				return Result{ID: s.ID, Path: path, Size: int(info.Size()), SHA256: sum}
-			}
-		}
-	}
-	timeout := opts.Timeout
-
-	if timeout == 0 {
-		timeout = 60 * time.Second
-	}
-	attempts := opts.Attempts
-	if attempts < 1 {
-		attempts = DefaultAttempts
+// one скачивает источник с повторами.
+func one(ctx context.Context, src sources.Source, opts Options) ([]byte, error) {
+	client := &http.Client{
+		Timeout: opts.Timeout,
+		Transport: &http.Transport{
+			// Проверка сертификата подписки отключается только по просьбе
+			// из конфига: сам источник может стоять на самоподписанном
+			// сертификате.
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: src.Insecure},
+		},
 	}
 
-	var (
-		body    []byte
-		lastErr error
-	)
-	for attempt := 1; attempt <= attempts; attempt++ {
-		body, lastErr = download(ctx, s, timeout)
-		if lastErr == nil {
-			break
-		}
-		// Отменённый контекст повторять бессмысленно.
-		if ctx.Err() != nil {
-			break
-		}
-		if attempt < attempts {
+	var lastErr error
+	for n := 1; n <= opts.Attempts; n++ {
+		if n > 1 {
+			pause := time.Duration(n-1) * 500 * time.Millisecond
 			select {
 			case <-ctx.Done():
-			case <-time.After(retryDelay * time.Duration(attempt)):
+				return nil, ctx.Err()
+			case <-time.After(pause):
 			}
 		}
+		body, err := fetchOnce(ctx, client, src)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
 	}
-	if lastErr != nil {
-		return Result{ID: s.ID, Error: lastErr}
-	}
-	// Пустой ответ не перезаписывает рабочее сырьё: иначе один сбой сети
-	// стирает данные, и следующий запуск молча работает с пустотой.
-	if len(body) == 0 {
-		return Result{ID: s.ID, Error: fmt.Errorf("fetch %s: empty body, raw file left untouched", s.ID)}
-	}
-
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		return Result{ID: s.ID, Error: err}
-	}
-	// Боковая запись пишется после сырья и без проверки ошибки в пути
-	// возврата: если она не запишется, следующий запуск просто перекачает
-	// файл заново — это дешевле, чем оставить кэш без опознавания.
-	_ = writeMeta(metaPath(path), s)
-
-	sum := sha256.Sum256(body)
-	return Result{ID: s.ID, Path: path, Size: len(body), SHA256: hex.EncodeToString(sum[:])}
+	return nil, lastErr
 }
 
-// download делает одну попытку скачивания и возвращает тело ответа.
-//
-// Транспорт создаётся на каждую попытку: после оборванного TLS-handshake
-// переиспользовать пул соединений бессмысленно, а свежий клиент снимает
-// вопрос «сломался сервер или залип коннект».
-func download(ctx context.Context, s sources.Source, timeout time.Duration) ([]byte, error) {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: s.Insecure},
-		Proxy:           http.ProxyFromEnvironment,
-	}
-	defer transport.CloseIdleConnections()
-
-	client := &http.Client{Timeout: timeout, Transport: transport}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.URL, nil)
+func fetchOnce(ctx context.Context, client *http.Client, src sources.Source) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
 		return nil, err
 	}
-	if s.UA != "" {
-		req.Header.Set("User-Agent", s.UA)
+	ua := strings.TrimSpace(src.UA)
+	if ua == "" {
+		ua = DefaultUA
 	}
-	for k, v := range s.Headers {
-		req.Header.Set(k, v)
-	}
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Accept", "*/*")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", s.ID, err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch %s: HTTP %d", s.ID, resp.StatusCode)
+		// Тело ошибки не читается: у прокси-провайдеров там бывает HTML на
+		// мегабайт, а код ответа уже объясняет причину.
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", s.ID, err)
+		return nil, err
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("response is larger than %d MiB", maxBody>>20)
 	}
 	return body, nil
 }
 
-// metaPath — боковая запись о том, каким запросом получено сырьё.
-func metaPath(rawPath string) string { return rawPath + ".meta.json" }
+// unsafeName оставляет в имени файла только безопасные символы.
+var unsafeName = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 
-// fetchMeta — то, от чего зависит содержимое ответа. URL и заголовки
-// сравниваются целиком: подписки меняют выдачу по любому из них, а разница
-// между 34 реальными узлами и заглушкой 0.0.0.0:1 в них не видна.
-type fetchMeta struct {
-	URL      string            `json:"url"`
-	UA       string            `json:"ua"`
-	Headers  map[string]string `json:"headers"`
-	Insecure bool              `json:"insecure"`
-}
-
-func metaFor(s sources.Source) fetchMeta {
-	return fetchMeta{URL: s.URL, UA: s.UA, Headers: s.Headers, Insecure: s.Insecure}
-}
-
-func writeMeta(path string, s sources.Source) error {
-	body, err := json.MarshalIndent(metaFor(s), "", "  ")
-	if err != nil {
+// dump сохраняет исходное тело источника для разбора вручную.
+func dump(dir string, index int, src sources.Source, body []byte) error {
+	name := unsafeName.ReplaceAllString(src.Name(), "_")
+	if name == "" {
+		name = "source"
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%02d-%s.txt", index, name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(path, body, 0o644)
-}
-
-// metaMatches сообщает, скачано ли сырьё тем же запросом, что описан сейчас.
-// Отсутствие или порча записи — повод перекачать.
-func metaMatches(path string, s sources.Source) bool {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var got fetchMeta
-	if err := json.Unmarshal(body, &got); err != nil {
-		return false
-	}
-	return reflect.DeepEqual(got, metaFor(s))
-}
-
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }

@@ -25,9 +25,8 @@ func duplicateNameNodes() []model.Node {
 }
 
 // TestWriteMihomoConfigReportsCoreNames закрывает дефект, из-за которого
-// проба переключала селектор на «🇳🇱» для ВСЕХ дублей, тогда как в конфиге
-// они назывались «🇳🇱», «🇳🇱 #2», «🇳🇱 #3». Ядро в таком случае переключается
-// на первый узел, и вердикт с задержкой достаются чужому серверу.
+// замер уходил на первый дубль: /proxies/{name}/delay получал имя, которого
+// нет в конфиге, и вердикт с задержкой доставались чужому серверу.
 func TestWriteMihomoConfigReportsCoreNames(t *testing.T) {
 	nodes := duplicateNameNodes()
 	cfg := Defaults()
@@ -47,8 +46,7 @@ func TestWriteMihomoConfigReportsCoreNames(t *testing.T) {
 		t.Fatalf("cannot read generated config: %v", err)
 	}
 	var doc struct {
-		Proxies     []map[string]any `yaml:"proxies"`
-		ProxyGroups []map[string]any `yaml:"proxy-groups"`
+		Proxies []map[string]any `yaml:"proxies"`
 	}
 	if err := yaml.Unmarshal(body, &doc); err != nil {
 		t.Fatalf("generated config does not parse: %v", err)
@@ -69,23 +67,20 @@ func TestWriteMihomoConfigReportsCoreNames(t *testing.T) {
 		if !declared[coreName] {
 			t.Errorf("core name %q for %s:%d is not declared in the config", coreName, n.Server, n.Port)
 		}
-		if probeName := coreNameFor(names, n); probeName != coreName {
-			t.Errorf("probe would select %q while the config declares %q", probeName, coreName)
-		}
 	}
 
-	// Главное: у дублей имена РАЗНЫЕ, иначе PUT уводит пробу на чужой узел.
+	// Главное: у дублей имена РАЗНЫЕ, иначе замер уходит на чужой узел.
 	distinct := map[string]bool{}
 	for _, n := range nodes {
-		distinct[coreNameFor(names, n)] = true
+		distinct[names[n.ID]] = true
 	}
 	if len(distinct) != len(nodes) {
 		t.Errorf("duplicate names collapsed to %d core names for %d nodes: %v", len(distinct), len(nodes), distinct)
 	}
 }
 
-// TestWriteMihomoConfigSelectsOwnNode — регресс на исходный сценарий: проба
-// для второго дубля не должна слать имя первого.
+// TestWriteMihomoConfigSelectsOwnNode — регресс на исходный сценарий: замер
+// для второго дубля не должен идти под именем первого.
 func TestWriteMihomoConfigSelectsOwnNode(t *testing.T) {
 	nodes := duplicateNameNodes()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -96,8 +91,8 @@ func TestWriteMihomoConfigSelectsOwnNode(t *testing.T) {
 	if len(skipped) != 0 {
 		t.Fatalf("nodes were dropped from the core config: %+v", skipped)
 	}
-	first := coreNameFor(names, nodes[0])
-	second := coreNameFor(names, nodes[1])
+	first := names[nodes[0].ID]
+	second := names[nodes[1].ID]
 	if first == second {
 		t.Fatalf("both duplicates are probed under %q: the second verdict belongs to the first server", first)
 	}

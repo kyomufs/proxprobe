@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -124,9 +125,11 @@ func (n *Node) Credential() string {
 // Регистр SNI нормализуется: источники пишут один и тот же хост и как
 // example.com, и как EXAMPLE.com, и без нормализации один сервер получает
 // два разных ID. PublicKey не нормализуется — это base64, регистр значим.
+// SNI в отпечаток не входит: это маскировка TLS, а не адрес сервера.
+// Один reality-узел приходит из подписки десятком записей с разными SNI, и
+// включение SNI в ключ размножало его в профиле.
 func (n *Node) ComputeID() string {
-	trust := strings.ToLower(n.SNI)
-	trust += "|" + n.PublicKey
+	trust := n.PublicKey
 	if n.ShortID != "" {
 		trust += "|" + n.ShortID
 	}
@@ -141,6 +144,35 @@ func (n *Node) ComputeID() string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return n.Proto + "|" + strings.ToLower(n.Server) + "|" + fmt.Sprint(n.Port) + "|" + hex.EncodeToString(sum[:6])
 }
+
+// cleanName убирает рекламные хвосты подписок: ссылки на Telegram,
+// @-упоминания каналов и префикс Tel-. Имя вида «🇺🇸 US-1 | @channel»
+// должно остаться «🇺🇸 US-1», а чистая реклама — пустой строкой, чтобы
+// Finalize подставил имя из адреса.
+func cleanName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	name = telegramURLRe.ReplaceAllString(name, " ")
+	name = telegramBareRe.ReplaceAllString(name, " ")
+	if i := strings.Index(name, "@"); i >= 0 {
+		name = name[:i]
+	}
+	name = telPrefixRe.ReplaceAllString(name, " ")
+	name = strings.Join(strings.Fields(name), " ")
+	name = strings.Trim(name, " |-·,;:.!?()[]{}")
+	if strings.Trim(name, "|-·,;:.!?()[]{}") == "" {
+		return ""
+	}
+	return name
+}
+
+var (
+	telegramURLRe  = regexp.MustCompile(`(?i)\bhttps?://(?:t\.me|telegram\.me)/\S*`)
+	telegramBareRe = regexp.MustCompile(`(?i)\b(?:t\.me|telegram\.me)/\S*`)
+	telPrefixRe    = regexp.MustCompile(`(?i)\btel[-:]\s*`)
+)
 
 // Finalize заполняет ID и приводит поля к единому виду.
 func (n *Node) Finalize() {
@@ -162,6 +194,10 @@ func (n *Node) Finalize() {
 			n.Security = SecTLS
 		}
 	}
+	if n.Name == "" {
+		n.Name = fmt.Sprintf("%s-%s:%d", n.Proto, n.Server, n.Port)
+	}
+	n.Name = cleanName(n.Name)
 	if n.Name == "" {
 		n.Name = fmt.Sprintf("%s-%s:%d", n.Proto, n.Server, n.Port)
 	}

@@ -1,23 +1,22 @@
-// Command proxprobe собирает серверы из разнородных подписок, проверяет их
-// живость через ядро mihomo и выгружает результат в форматы подписок.
+// Command proxprobe собирает подписку из sources.yaml, проверяет узлы и
+// пишет профиль для клиента вместе с отчётом.
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kyomufs/proxprobe/internal/detect"
 	"github.com/kyomufs/proxprobe/internal/emit"
 	"github.com/kyomufs/proxprobe/internal/fetch"
-	"github.com/kyomufs/proxprobe/internal/layout"
 	"github.com/kyomufs/proxprobe/internal/merge"
 	"github.com/kyomufs/proxprobe/internal/model"
 	"github.com/kyomufs/proxprobe/internal/parse"
@@ -25,171 +24,234 @@ import (
 	"github.com/kyomufs/proxprobe/internal/sources"
 )
 
-// buildVersion подставляется линкером при сборке пакета.
-var buildVersion = "dev"
+// version подставляется при сборке: -ldflags "-X main.version=..."
+var version = "dev"
 
-const usage = `proxprobe — сбор, проверка и конвертация прокси-подписок
+const usage = `proxprobe — собирает подписку из sources.yaml и проверяет узлы.
 
-использование:
-  proxprobe <команда> [флаги]
+Использование:
+  proxprobe [flags]
 
-команды:
-  fetch    скачать подписки в raw/
-  parse    разобрать скачанное в nodes/
-  merge    слить узлы из всех источников без дубликатов
-  ping     проверить TCP-доступность узлов
-  probe    проверить узлы реальным запросом через ядро mihomo
-  export   выгрузить результат в clash/best
-  all      выполнить весь конвейер подряд
-  version  напечатать версию
+Флаги:
+  --config PATH   sources.yaml (по умолчанию $XDG_CONFIG_HOME/proxprobe/sources.yaml)
+  --out DIR       каталог для sub.yaml и report.txt (по умолчанию $XDG_DATA_HOME/proxprobe)
+  --check LIST    проверки через запятую: none, tcp, http (по умолчанию tcp,http)
+  --core NAME     бинарь ядра mihomo (по умолчанию mihomo)
+  --jobs N        сколько узлов HTTP-проверка проверяет одновременно (по умолчанию 16)
+  --dump-raw DIR  сохранить исходные тела подписок в DIR
+  --version       напечатать версию
 
-флаги:
-  --config    путь к sources.yaml (по умолчанию ./sources.yaml)
-  --workdir   рабочий каталог (по умолчанию ./out)
+Коды возврата:
+  0 — sub.yaml записан, хотя бы один узел прошёл проверки
+  1 — живых узлов нет (sub.yaml не тронут, report.txt обновлён)
+  2 — ошибка запуска: конфиг, флаги, ядро
 `
 
+type options struct {
+	config  string
+	out     string
+	check   string
+	core    string
+	jobs    int
+	dumpRaw string
+	version bool
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
+	os.Exit(run(os.Args[1:]))
+}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	cmd := os.Args[1]
-	args := os.Args[2:]
-
-	var err error
-	switch cmd {
-	case "fetch":
-		err = cmdFetch(ctx, args)
-	case "parse":
-		err = cmdParse(ctx, args)
-	case "merge":
-		err = cmdMerge(ctx, args)
-	case "ping":
-		err = cmdPing(ctx, args)
-	case "probe":
-		err = cmdProbe(ctx, args)
-	case "export":
-		err = cmdExport(ctx, args)
-	case "all":
-		err = cmdAll(ctx, args)
-	case "version":
-		fmt.Printf("proxprobe %s\n", buildVersion)
-	case "help", "-h", "--help":
+func run(args []string) int {
+	opts, err := parseArgs(args)
+	if errors.Is(err, flag.ErrHelp) {
 		fmt.Print(usage)
-	default:
-		fmt.Fprintf(os.Stderr, "proxprobe: unknown command %q\n\n%s", cmd, usage)
-		os.Exit(2)
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "proxprobe: %v\n\n%s", err, usage)
+		return 2
+	}
+	if opts.version {
+		fmt.Printf("proxprobe %s\n", version)
+		return 0
 	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "proxprobe %s: %v\n", cmd, err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	report := &emit.Report{Started: time.Now(), Checks: opts.check}
+	code, runErr := execute(ctx, opts, report)
+	report.Duration = time.Since(report.Started)
+
+	// Отчёт пишется всегда, когда конфиг прочитан: без него неудачный прогон
+	// невозможно объяснить. Ошибка конфига сюда не доходит — писать отчёт
+	// поверх прошлого было бы хуже, чем не писать ничего.
+	if len(report.Sources) > 0 {
+		if err := writeReport(opts.out, report); err != nil {
+			fmt.Fprintf(os.Stderr, "proxprobe: cannot write report: %v\n", err)
+			if code == 0 {
+				code = 2
+			}
+		}
 	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "proxprobe: %v\n", runErr)
+	}
+	return code
 }
 
-func cmdFetch(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
-	cb := bindCommon(fs)
-	refresh := fs.Bool("refresh", false, "re-download even if raw file exists")
-	attempts := fs.Int("attempts", fetch.DefaultAttempts, "attempts per source before giving up")
-	c, err := cb.parse(fs, args)
+func parseArgs(args []string) (options, error) {
+	var opts options
+	fs := flag.NewFlagSet("proxprobe", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.StringVar(&opts.config, "config", defaultConfigPath(), "path to sources.yaml")
+	fs.StringVar(&opts.out, "out", defaultDataDir(), "output directory")
+	fs.StringVar(&opts.check, "check", "tcp,http", "checks: none, tcp, http")
+	fs.StringVar(&opts.core, "core", "mihomo", "core binary name")
+	fs.IntVar(&opts.jobs, "jobs", probe.HTTPJobs, "HTTP check concurrency")
+	fs.StringVar(&opts.dumpRaw, "dump-raw", "", "save raw source bodies to this directory")
+	fs.BoolVar(&opts.version, "version", false, "print version")
+	if err := fs.Parse(args); err != nil {
+		return options{}, err
+	}
+	if fs.NArg() > 0 {
+		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	return opts, nil
+}
+
+func defaultConfigPath() string {
+	dir, err := os.UserConfigDir()
 	if err != nil {
-		return err
+		return "sources.yaml"
+	}
+	return filepath.Join(dir, "proxprobe", "sources.yaml")
+}
+
+func defaultDataDir() string {
+	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+		return filepath.Join(dir, "proxprobe")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "out"
+	}
+	return filepath.Join(home, ".local", "share", "proxprobe")
+}
+
+// verdict — результат последней проверки, которую узел прошёл или не прошёл.
+type verdict struct {
+	check string
+	res   probe.Result
+}
+
+func execute(ctx context.Context, opts options, report *emit.Report) (int, error) {
+	list, err := sources.Load(opts.config)
+	if err != nil {
+		return 2, err
 	}
 
-	list, err := sources.Load(c.config)
-	if err != nil {
-		return err
-	}
-	list = sources.Active(list)
+	fetched := fetch.All(ctx, list, fetch.Options{DumpDir: opts.dumpRaw})
+	var groups [][]model.Node
+	failed := 0
 
-	results := fetch.All(ctx, list, fetch.Options{
-		RawDir:   layout.DirPath(c.workdir, layout.RawDir),
-		Refresh:  *refresh,
-		Attempts: *attempts,
-	})
-
-	var failed int
-	for _, r := range results {
-		if r.Error != nil {
+	for _, r := range fetched {
+		stat := emit.ReportSource{Index: r.Index + 1, Name: r.Source.Name()}
+		if r.Err != nil {
+			stat.Err = r.Err.Error()
 			failed++
-			fmt.Printf("  %-20s FAILED  %v\n", r.ID, r.Error)
+			report.Sources = append(report.Sources, stat)
 			continue
 		}
-		fmt.Printf("  %-20s %8d bytes  sha256:%s\n", r.ID, r.Size, r.SHA256[:12])
-	}
-	if failed == len(results) {
-		return fmt.Errorf("every source failed")
-	}
-	return nil
-}
 
-func cmdParse(_ context.Context, args []string) error {
-	fs := flag.NewFlagSet("parse", flag.ExitOnError)
-	cb := bindCommon(fs)
-	only := fs.String("source", "", "parse only this source id")
-	c, err := cb.parse(fs, args)
-	if err != nil {
-		return err
-	}
-
-	list, err := sources.Load(c.config)
-	if err != nil {
-		return err
-	}
-
-	nodesDir := layout.DirPath(c.workdir, layout.NodesDir)
-	if err := os.MkdirAll(nodesDir, 0o755); err != nil {
-		return err
-	}
-
-	var total int
-	var skipPath = layout.SkipPath(c.workdir)
-	if err := layout.EnsurePath(skipPath); err != nil {
-		return err
-	}
-	skipFile, err := os.Create(skipPath)
-	if err != nil {
-		return err
-	}
-	defer skipFile.Close()
-
-	for _, s := range sources.Active(list) {
-		if *only != "" && s.ID != *only {
-			continue
+		format, body := detect.Sniff(r.Body)
+		parsed := parseAs(format, body, r.Source.Name())
+		stat.Format = string(format)
+		stat.Nodes = len(parsed.Nodes)
+		stat.Skips = len(parsed.Skips)
+		if r.DumpErr != nil {
+			stat.DumpErr = r.DumpErr.Error()
 		}
-		path := layout.RawPath(c.workdir, s.ID)
-		body, err := os.ReadFile(path)
+		report.Sources = append(report.Sources, stat)
+		report.Parsed += len(parsed.Nodes)
+		report.Skipped += len(parsed.Skips)
+		groups = append(groups, parsed.Nodes)
+	}
+
+	if len(fetched) > 0 && failed == len(fetched) {
+		return 1, errors.New("all sources failed")
+	}
+
+	nodes, merged := merge.Merge(groups)
+	report.Unique = merged.Unique
+	report.Duplicates = merged.Duplicate
+	if len(nodes) == 0 {
+		return 1, errors.New("no proxies parsed from sources")
+	}
+
+	tun := probe.DetectHostTUN()
+	report.HostTUN = tun
+	if tun {
+		fmt.Fprintln(os.Stderr, "proxprobe: host TUN detected, measurements go through it")
+	}
+
+	checks, err := probe.ParseChecks(opts.check, probe.Options{
+		CorePath: opts.core,
+		Jobs:     opts.jobs,
+		Progress: progressToStderr,
+		HostTUN:  tun,
+	})
+	if err != nil {
+		return 2, err
+	}
+
+	all := nodes
+	verdicts := make(map[string]verdict, len(all))
+	for _, c := range checks {
+		input := len(nodes)
+		alive, results, note, err := c.Run(ctx, nodes)
 		if err != nil {
-			fmt.Printf("  %-20s SKIPPED (no raw file)\n", s.ID)
-			continue
+			return 2, fmt.Errorf("%s check: %w", c.Name(), err)
 		}
-
-		format, decoded := detect.Sniff(body)
-		res := parseAs(format, decoded, s.ID)
-
-		outPath := layout.NodesPath(c.workdir, s.ID)
-		if err := writeNodesJSONL(outPath, res.Nodes); err != nil {
-			return err
+		if note != "" {
+			fmt.Fprintf(os.Stderr, "proxprobe: %s %s\n", c.Name(), note)
 		}
-		total += len(res.Nodes)
-
-		fmt.Printf("  %-20s format=%-12s nodes=%5d skips=%d\n",
-			s.ID, format, len(res.Nodes), len(res.Skips))
-		for _, sk := range res.Skips {
-			fmt.Fprintf(skipFile, "%s\t%s\t%s\n", s.ID, sk.Reason, sk.Line)
+		for _, r := range results {
+			verdicts[r.ID] = verdict{check: c.Name(), res: r}
+		}
+		report.Checked = append(report.Checked, emit.ReportCheck{
+			Name: c.Name(), In: input, Out: len(alive), Note: note,
+		})
+		nodes = alive
+	}
+	if len(checks) == 0 {
+		for _, n := range all {
+			verdicts[n.ID] = verdict{res: probe.Result{OK: true}}
 		}
 	}
 
-	fmt.Printf("parsed %d nodes total\n", total)
-	return nil
+	sortByDelay(nodes, verdicts)
+	report.Nodes = reportNodes(all, verdicts)
+
+	if len(nodes) == 0 {
+		// Прошлый профиль не перезаписывается: пустой sub.yaml в клиенте
+		// выглядит как поломка, а старый рабочий набор лучше нуля.
+		return 1, fmt.Errorf("no nodes passed checks (%s); %s left untouched", opts.check, emit.SubFile)
+	}
+
+	body, err := emit.Subscription(nodes)
+	if err != nil {
+		return 2, err
+	}
+	path := filepath.Join(opts.out, emit.SubFile)
+	if err := writeAtomic(path, body); err != nil {
+		return 2, fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	report.Written = len(nodes)
+	fmt.Printf("%s: %d nodes\n", path, len(nodes))
+	return 0, nil
 }
 
-// parseAs направляет тело подписки в парсер нужного формата.
 func parseAs(format detect.Format, body []byte, source string) *parse.Result {
 	switch format {
 	case detect.FormatLinks, detect.FormatLinksB64:
@@ -203,583 +265,89 @@ func parseAs(format detect.Format, body []byte, source string) *parse.Result {
 	case detect.FormatSingbox:
 		return parse.Singbox(body, source)
 	}
-	res := &parse.Result{}
-	return res
+	return &parse.Result{}
 }
 
-func writeNodesJSONL(path string, nodes []model.Node) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	for _, n := range nodes {
-		if err := enc.Encode(n); err != nil {
-			return err
+// sortByDelay ставит живые узлы по возрастанию задержки; при равной
+// задержке — по имени, чтобы порядок был стабилен между прогонами.
+func sortByDelay(nodes []model.Node, verdicts map[string]verdict) {
+	sort.SliceStable(nodes, func(i, j int) bool {
+		vi, vj := verdicts[nodes[i].ID], verdicts[nodes[j].ID]
+		if vi.res.OK && vj.res.OK && vi.res.DelayMs != vj.res.DelayMs {
+			return vi.res.DelayMs < vj.res.DelayMs
 		}
-	}
-	return nil
+		return nodes[i].Name < nodes[j].Name
+	})
 }
 
-func readNodesJSONL(path string) ([]model.Node, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+// reportNodes собирает строки отчёта: живые по задержке, мёртвые по имени.
+func reportNodes(all []model.Node, verdicts map[string]verdict) []emit.ReportNode {
+	out := make([]emit.ReportNode, 0, len(all))
+	for _, n := range all {
+		v := verdicts[n.ID]
+		out = append(out, emit.ReportNode{
+			Name: n.Name, Proto: string(n.Proto), Server: n.Server, Port: n.Port,
+			DelayMs: v.res.DelayMs, OK: v.res.OK, Check: v.check, Err: v.res.Error,
+			Source: joinSources(n.Source),
+		})
 	}
-	defer f.Close()
-
-	var nodes []model.Node
-	dec := json.NewDecoder(f)
-	for dec.More() {
-		var n model.Node
-		if err := dec.Decode(&n); err != nil {
-			return nil, err
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].OK != out[j].OK {
+			return out[i].OK
 		}
-		nodes = append(nodes, n)
-	}
-	return nodes, nil
-}
-
-// loadNodeGroups читает все разобранные подписки в порядке конфига: порядок
-// источников задаёт приоритет при слиянии дубликатов.
-func loadNodeGroups(config, workdir string) ([][]model.Node, []string, error) {
-	list, err := sources.Load(config)
-	if err != nil {
-		return nil, nil, err
-	}
-	var groups [][]model.Node
-	var ids []string
-	for _, s := range sources.Active(list) {
-		path := layout.NodesPath(workdir, s.ID)
-		nodes, err := readNodesJSONL(path)
-		if err != nil {
-			continue // источник не разобран — это не ошибка всего запуска
+		if out[i].OK && out[i].DelayMs != out[j].DelayMs {
+			return out[i].DelayMs < out[j].DelayMs
 		}
-		groups = append(groups, nodes)
-		ids = append(ids, s.ID)
-	}
-	if len(groups) == 0 {
-		return nil, nil, fmt.Errorf("no parsed sources in %s/nodes; run parse first", workdir)
-	}
-	return groups, ids, nil
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
-func cmdMerge(_ context.Context, args []string) error {
-	fs := flag.NewFlagSet("merge", flag.ExitOnError)
-	cb := bindCommon(fs)
-	c, err := cb.parse(fs, args)
-	if err != nil {
-		return err
+func joinSources(list []string) string {
+	if len(list) == 0 {
+		return ""
 	}
-
-	groups, ids, err := loadNodeGroups(c.config, c.workdir)
-	if err != nil {
-		return err
-	}
-	nodes, report := merge.Merge(groups)
-
-	outPath := layout.MergedPath(c.workdir)
-	if err := layout.EnsurePath(outPath); err != nil {
-		return err
-	}
-	if err := writeNodesJSONL(outPath, nodes); err != nil {
-		return err
-	}
-
-	fmt.Printf("sources: %s\n", strings.Join(ids, ", "))
-	fmt.Printf("merged: input=%d unique=%d duplicates=%d\n",
-		report.Input, report.Unique, report.Duplicate)
-	for proto, count := range report.ByProto {
-		fmt.Printf("  %-12s %5d\n", proto, count)
-	}
-	if len(report.Collisions) > 0 {
-		fmt.Printf("overlapping nodes: %d (first three: ", len(report.Collisions))
-		for i, col := range report.Collisions {
-			if i == 3 {
-				break
-			}
-			if i > 0 {
-				fmt.Print(", ")
-			}
-			fmt.Printf("%s", strings.Join(col.Sources, "+"))
-		}
-		fmt.Println(")")
-	}
-	return nil
-}
-
-func cmdPing(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("ping", flag.ExitOnError)
-	cb := bindCommon(fs)
-	concurrency := fs.Int("concurrency", 200, "parallel dials")
-	timeout := fs.Duration("timeout", 2*time.Second, "dial timeout")
-	dns := fs.String("dns", "", "DNS servers for node names, comma-separated (default: 1.1.1.1,8.8.8.8)")
-	c, err := cb.parse(fs, args)
-	if err != nil {
-		return err
-	}
-
-	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
-	if err != nil {
-		return fmt.Errorf("run merge first: %w", err)
-	}
-
-	results := probe.TCP(ctx, nodes, *concurrency, *timeout, splitList(*dns))
-	if err := probe.WriteJSONL(layout.TCPPath(c.workdir), results); err != nil {
-		return err
-	}
-
-	ok, dnsFail, dialFail := probe.Summarise(results)
-	fmt.Printf("tcp probe: alive=%d dns_failed=%d dial_failed=%d of %d\n",
-		ok, dnsFail, dialFail, len(results))
-	return nil
-}
-
-func cmdProbe(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("probe", flag.ExitOnError)
-	cb := bindCommon(fs)
-	core := fs.String("core", "mihomo", "path to core binary")
-	testURL := fs.String("url", "", "URL to fetch through each node")
-	timeout := fs.Duration("timeout", 0, "per-node timeout")
-	concurrency := fs.Int("concurrency", 16, "parallel node probes")
-	// Порты ядра вынесены в флаги, потому что по умолчанию они фиксированы, а
-	// два одновременных прогона на одной машине иначе не развести: второй
-	// упирается в «port is busy» и останавливается.
-	defaults := probe.Defaults()
-	mixedPort := fs.Int("mixed-port", defaults.MixedPort, "core socks/http inbound port")
-	controlPort := fs.Int("control-port", defaults.ControlPort, "core REST API port")
-	dns := fs.String("dns", "", "DNS servers for the core and node names (default: 1.1.1.1,8.8.8.8)")
-
-	if *timeout == 0 {
-		*timeout = 5 * time.Second
-	}
-	c, err := cb.parse(fs, args)
-	if err != nil {
-		return err
-	}
-
-	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
-	if err != nil {
-		return fmt.Errorf("run merge first: %w", err)
-	}
-
-	cfg := probe.Defaults()
-	cfg.CorePath = *core
-	cfg.WorkDir = c.workdir
-	cfg.Timeout = *timeout
-	cfg.Concurrency = *concurrency
-	cfg.MixedPort = *mixedPort
-	cfg.ControlPort = *controlPort
-	cfg.DNS = splitList(*dns)
-	if *testURL != "" {
-		cfg.TestURL = *testURL
-	}
-	// Прогон на тысячах узлов идёт минутами; без отчёта о ходе он
-	// неотличим от зависания.
-	cfg.Progress = func(done, total int) {
-		fmt.Printf("\r  probing %d/%d…", done, total)
-	}
-
-	results, err := probe.Mihomo(ctx, nodes, cfg)
-	fmt.Print("\r")
-	if err != nil {
-		return err
-	}
-	if err := probe.WriteResults(layout.HTTPPath(c.workdir), results); err != nil {
-		return err
-	}
-
-	counts := map[string]int{}
-	for _, r := range results {
-		status := r.Status
-		if status == "" {
-			// Запись без статуса возможна только у старых результатов;
-			// здесь её источник — тот же прогон, поэтому fallback.
-			status = probe.StatusDead
-		}
-		counts[status]++
-	}
-	fmt.Printf("http probe via %s: alive=%d throttled=%d forbidden=%d dead=%d\n",
-		*core, counts[probe.StatusAlive], counts[probe.StatusThrottled],
-		counts[probe.StatusForbidden], counts[probe.StatusDead])
-	// Ноль живых — это результат измерения, а не сбой прогона: подписка могла
-	// умереть целиком, а merged.yaml всё равно нужен. Раньше шаг возвращал
-	// ошибку, и «all» обрывался до экспорта — наружу не уезжало НИЧЕГО, хотя
-	// профиль со всеми узлами был готов.
-	if counts[probe.StatusAlive] == 0 && len(results) > 0 {
-		fmt.Fprintf(os.Stderr, "внимание: ни один узел не ответил через ядро — sorted.yaml останется пустым\n")
-	}
-	return nil
-}
-
-func cmdExport(_ context.Context, args []string) error {
-	fs := flag.NewFlagSet("export", flag.ExitOnError)
-	cb := bindCommon(fs)
-	target := fs.String("target", "all", "merged|sorted|all")
-	keepPools := fs.Int("keep-pools", 1, "max nodes kept per server:port pool (0 = no dedup)")
-	c, err := cb.parse(fs, args)
-	if err != nil {
-		return err
-	}
-
-	nodes, err := readNodesJSONL(layout.MergedPath(c.workdir))
-	if err != nil {
-		return fmt.Errorf("run merge first: %w", err)
-	}
-	before := len(nodes)
-	var rep attachReport
-	nodes, rep = attachDelays(c.workdir, nodes)
-	nodes = dedupeByPool(nodes, *keepPools)
-	fmt.Fprintf(os.Stderr, "  отбор: %s\n", rep)
-	if *keepPools > 0 {
-		fmt.Fprintf(os.Stderr, "  pools: %d nodes -> %d (keep %d per server:port)\n",
-			before, len(nodes), *keepPools)
-	}
-
-	targets := []string{"merged", "sorted"}
-	if *target != "all" {
-		targets = splitTargets(*target)
-	}
-
-	paths, err := emit.WriteAll(layout.ClashDirPath(c.workdir), nodes, targets)
-	if err != nil {
-		return err
-	}
-	for _, p := range paths {
-		// os.Stat без проверки ошибки ронял команду паникой на nil: путь,
-		// который WriteAll успел записать в список, но не успел создать.
-		info, err := os.Stat(p)
-		if err != nil {
-			fmt.Printf("  %-40s %s\n", p, err)
-			continue
-		}
-		fmt.Printf("  %-40s %8d bytes\n", p, info.Size())
-	}
-	return nil
-}
-
-// splitTargets разбирает список целей из --target.
-//
-// Пробелы снимаются: «--target merged, sorted» — обычная запись списка, а
-// пустой элемент («merged,,sorted») раньше доезжал до WriteAll и валил экспорт
-// на «unknown target ""».
-func splitTargets(spec string) []string {
-	if out := splitList(spec); len(out) > 0 {
-		return out
-	}
-	return []string{"merged", "sorted"}
-}
-
-// splitList разбирает список через запятую, отбрасывая пустые элементы.
-func splitList(spec string) []string {
-	var out []string
-	for _, part := range strings.Split(spec, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
+	out := list[0]
+	for _, s := range list[1:] {
+		out += "," + s
 	}
 	return out
 }
 
-// attachDelays переносит замеры HTTP-пробы в Raw узлов: экспортёр best
-// отбирает и сортирует именно по ним.
-//
-// Узел считается живым, только если HTTP-запрос прошёл И TCP-этап до него
-// тоже дал коннект. Без второй проверки мёртвый узел с refused-портом
-// попадал в sorted.yaml: проба ходит через ядро, и при неверно выбранном
-// маршруте запрос отвечает 2xx напрямую, а задержка принадлежит каналу
-// хоста, а не узлу.
-//
-// Возвращается отчёт об отборе: узлы, выпавшие из-за отсутствия TCP-этапа,
-// нигде больше не видны, и без счётчика прогон выглядит так, будто они просто
-// не проверялись.
-func attachDelays(workdir string, nodes []model.Node) ([]model.Node, attachReport) {
-	var rep attachReport
-	results, err := probe.ReadResults(layout.HTTPPath(workdir))
+func progressToStderr(done, total int) {
+	fmt.Fprintf(os.Stderr, "http: checked %d/%d\n", done, total)
+}
+
+func writeReport(dir string, report *emit.Report) error {
+	path := filepath.Join(dir, emit.ReportFile)
+	return writeAtomic(path, emit.RenderReport(*report))
+}
+
+// writeAtomic пишет файл через временный и переименование: прерванный
+// прогон не оставляет клиенту половину профиля.
+func writeAtomic(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
-		// HTTP-пробы не было: живость берётся из TCP, иначе sorted.yaml
-		// остаётся пустым скелетом, хотя порты открыты и замеры есть.
-		nodes, rep.fromTCP = tcpDelays(workdir, nodes), true
-		rep.probeResults = 0
-		return nodes, rep
+		return err
 	}
-	rep.probeResults = len(results)
-	reachable, hasTCP := tcpReachable(workdir)
-	rep.hasTCP = hasTCP
+	name := tmp.Name()
+	defer os.Remove(name)
 
-	type verdict struct {
-		delay  float64
-		status string
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	verdicts := map[string]verdict{}
-	for _, r := range results {
-		if r.OK {
-			if hasTCP && !reachable[r.ID] {
-				rep.droppedNoTCP++
-				continue
-			}
-			verdicts[r.ID] = verdict{delay: r.DelayMs, status: probe.StatusAlive}
-			continue
-		}
-		// 429 и 403 — это ответ цели, а не обрыв. Задержка у них измерена,
-		// и статус нужен экспортёру, чтобы пул с исчерпанной квотой выпал
-		// целиком, а не притворился живым.
-		if r.Status == probe.StatusThrottled || r.Status == probe.StatusForbidden {
-			verdicts[r.ID] = verdict{delay: r.DelayMs, status: r.Status}
-		}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	rep.verdicts = len(verdicts)
-	for i := range nodes {
-		v, ok := verdicts[nodes[i].ID]
-		if !ok {
-			continue
-		}
-		if nodes[i].Raw == nil {
-			nodes[i].Raw = map[string]any{}
-		}
-		nodes[i].Raw["delay_ms"] = v.delay
-		nodes[i].Raw["status"] = v.status
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-	return nodes, rep
-}
-
-// attachReport — что произошло при переносе замеров в узлы.
-//
-// Без этих чисел отбор невидим: узел, у которого HTTP-проба прошла, но TCP
-// не подтвердил живость, молча исчезал из профиля, и отличить это от «узел не
-// проверялся» было нельзя.
-type attachReport struct {
-	probeResults int  // сколько записей было в http.jsonl
-	verdicts     int  // сколько узлов получили вердикт
-	droppedNoTCP int  // 2xx без подтверждения TCP
-	fromTCP      bool // HTTP-пробы не было, задержки взяты из TCP
-	hasTCP       bool // tcp.jsonl вообще есть
-}
-
-// String печатает отбор одной строкой: числа идут в stderr, потому что
-// stdout занят данными шага.
-func (r attachReport) String() string {
-	parts := []string{fmt.Sprintf("проба=%d вердиктов=%d", r.probeResults, r.verdicts)}
-	if r.fromTCP {
-		parts = append(parts, "задержки из TCP (http.jsonl нет)")
-	} else if r.hasTCP {
-		parts = append(parts, fmt.Sprintf("без TCP-подтверждения=%d", r.droppedNoTCP))
-	} else {
-		parts = append(parts, "tcp.jsonl нет: отбор только по HTTP")
-	}
-	return strings.Join(parts, " ")
-}
-
-// tcpDelays переносит TCP-замеры в Raw узлов, когда HTTP-пробы не было.
-//
-// Живым здесь считается узел с открытым портом: это ровно то, что знает
-// TCP-этап. Статус тоже ставится — StatusAlive, — иначе Sorted отбросит
-// узел по отсутствию статуса и профиль останется пустым. delay_ms берётся
-// из dial_ms: другого замера в этом режиме нет.
-func tcpDelays(workdir string, nodes []model.Node) []model.Node {
-	items, err := probe.ReadTCPResults(layout.TCPPath(workdir))
-	if err != nil {
-		return nodes
-	}
-	byID := make(map[string]probe.TCPResult, len(items))
-	for _, r := range items {
-		byID[r.ID] = r
-	}
-	for i := range nodes {
-		r, ok := byID[nodes[i].ID]
-		if !ok || !r.OK {
-			continue
-		}
-		if nodes[i].Raw == nil {
-			nodes[i].Raw = map[string]any{}
-		}
-		nodes[i].Raw["delay_ms"] = r.DialMs
-		nodes[i].Raw["status"] = model.StatusAlive
-	}
-	return nodes
-}
-
-// dedupeByPool оставляет в профиле не больше keep лучших узлов на пул
-// server:port.
-//
-// Сервисы обычно считают квоту на пул: 48 записей с одним server:port —
-// это один лимит, и в профиле им делать нечего. Победитель группы — самый
-// быстрый живой узел; если на пуле есть узел со статусом throttled или
-// forbidden, пул выбрасывается целиком, потому что лимит общий, и
-// «быстрый» узел того же пула сгорит вместе с ним.
-//
-// keep=0 отключает дедуп. keep<1 при включённом дедупе приводится к 1.
-func dedupeByPool(nodes []model.Node, keep int) []model.Node {
-	if keep < 0 {
-		keep = 0
-	}
-	if keep == 0 {
-		return nodes
-	}
-
-	poolOf := func(n model.Node) string {
-		return probe.PoolKey(n.Server, n.Port)
-	}
-	statusOf := func(n model.Node) string {
-		if n.Raw == nil {
-			return ""
-		}
-		s, _ := n.Raw["status"].(string)
-		return s
-	}
-	delayOf := func(n model.Node) float64 {
-		if n.Raw == nil {
-			return 1 << 30
-		}
-		if d, ok := n.Raw["delay_ms"].(float64); ok && d > 0 {
-			return d
-		}
-		return 1 << 30
-	}
-
-	// Порядок первого появления пула сохраняется: профиль не должен
-	// перетасовываться от прогона к прогону без причины.
-	var order []string
-	groups := map[string][]model.Node{}
-	for _, n := range nodes {
-		key := poolOf(n)
-		if _, seen := groups[key]; !seen {
-			order = append(order, key)
-		}
-		groups[key] = append(groups[key], n)
-	}
-
-	out := make([]model.Node, 0, len(order))
-	for _, key := range order {
-		members := groups[key]
-		dirty := false
-		for _, m := range members {
-			switch statusOf(m) {
-			case probe.StatusThrottled, probe.StatusForbidden:
-				dirty = true
-			}
-		}
-		if dirty {
-			continue
-		}
-
-		var alive []model.Node
-		for _, m := range members {
-			if statusOf(m) == probe.StatusAlive {
-				alive = append(alive, m)
-			}
-		}
-		// Пул без статусов (старые результаты без поля status) не трогаем:
-		// иначе экспорт после обновления начнёт молча терять узлы.
-		if len(alive) == 0 && len(members) > 0 {
-			out = append(out, members...)
-			continue
-		}
-		sort.SliceStable(alive, func(i, j int) bool { return delayOf(alive[i]) < delayOf(alive[j]) })
-		if len(alive) > keep {
-			alive = alive[:keep]
-		}
-		out = append(out, alive...)
-	}
-	return out
-}
-
-// tcpReachable читает tcp.jsonl и возвращает узлы с открытым портом.
-// Второе значение — был ли файл: без него отбор идёт только по HTTP-пробе.
-func tcpReachable(workdir string) (map[string]bool, bool) {
-	items, err := probe.ReadTCPResults(layout.TCPPath(workdir))
-	if err != nil {
-		return nil, false
-	}
-	live := make(map[string]bool, len(items))
-	for _, r := range items {
-		if r.OK {
-			live[r.ID] = true
-		}
-	}
-	return live, true
-}
-
-func cmdAll(ctx context.Context, args []string) error {
-	// «all -h» иначе неотличим от «all»: filterArgs выбрасывает незнакомый
-	// флаг, и вместо подсказки запускается пятнадцатиминутный прогон.
-	if len(args) > 0 {
-		switch args[0] {
-		case "-h", "-help", "--help", "help":
-			fmt.Print(usage)
-			fmt.Println()
-			fmt.Println("флаги шагов (передаются общим списком, каждый шаг берёт свои):")
-			fmt.Println("  --core --url --timeout --concurrency --mixed-port --control-port --dns")
-			fmt.Println("  --refresh --attempts --source --target --keep-pools")
-			return nil
-		}
-	}
-
-	// Аргументы фильтруются по шагу: у каждой подкоманды свой набор флагов,
-	// и общий список уронил бы шаг на "flag provided but not defined".
-	type step struct {
-		name string
-		fn   func(context.Context, []string) error
-		own  []string // флаги, объявленные только этой подкомандой
-	}
-	steps := []step{
-		{"fetch", cmdFetch, []string{"refresh", "attempts"}},
-		{"parse", cmdParse, []string{"source"}},
-		{"merge", cmdMerge, nil},
-		{"ping", cmdPing, []string{"concurrency", "timeout", "dns"}},
-		{"probe", cmdProbe, []string{"core", "url", "timeout", "concurrency", "mixed-port", "control-port", "dns"}},
-		{"export", cmdExport, []string{"target", "keep-pools"}},
-	}
-
-	allStarted := time.Now()
-	for i, st := range steps {
-		// Прогресс в stderr: stdout каждого шага — данные, которые можно
-		// перенаправить в файл, а «шаг 2 из 6» в тот же поток их испортил бы.
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(steps), st.name)
-		started := time.Now()
-		if err := st.fn(ctx, filterArgs(args, st.own)); err != nil {
-			return fmt.Errorf("step %s: %w", st.name, err)
-		}
-		fmt.Fprintf(os.Stderr, "[%d/%d] %s готово за %s\n",
-			i+1, len(steps), st.name, time.Since(started).Round(time.Millisecond))
-	}
-	fmt.Fprintf(os.Stderr, "конвейер завершён за %s\n", time.Since(allStarted).Round(time.Millisecond))
-	return nil
-}
-
-// filterArgs оставляет из аргументов только те, что понятны шагу.
-//
-// Общие флаги (-config, -workdir) и флаги самого шага проходят; чужие
-// отбрасываются вместе со значением. Без этого шаг падает с
-// «flag provided but not defined» на флаге соседней подкоманды.
-func filterArgs(args []string, own []string) []string {
-	allowed := map[string]bool{"config": true, "workdir": true}
-	for _, name := range own {
-		allowed[name] = true
-	}
-
-	var out []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		hasValue := strings.Contains(name, "=")
-		key := name
-		if idx := strings.Index(name, "="); idx >= 0 {
-			key = name[:idx]
-		}
-		if !allowed[key] {
-			continue
-		}
-		out = append(out, arg)
-		// Флаг со отдельным значением: переносим значение вместе с ним.
-		if !hasValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			out = append(out, args[i+1])
-			i++
-		}
-	}
-	return out
+	return os.Rename(name, path)
 }

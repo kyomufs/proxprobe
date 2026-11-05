@@ -2,6 +2,7 @@ package parse
 
 import (
 	"os"
+	"strings"
 	"path/filepath"
 	"testing"
 
@@ -285,5 +286,38 @@ func TestParseVMessBoolTLS(t *testing.T) {
 	}
 	if node.Security == model.SecTLS {
 		t.Error("tls=false was read as enabled")
+	}
+}
+
+func TestParseLinkRejectsPlaceholderServer(t *testing.T) {
+	// Заглушки из шаблонов подписок — не серверы: такой узел только
+	// засоряет профиль и висит в нём мёртвым.
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "localhost", "example.com", "::1"} {
+		line := "vless://00000000-0000-0000-0000-000000000000@" + host + ":443?security=none#node"
+		if _, err := ParseLink(line); err == nil {
+			t.Errorf("ParseLink accepted placeholder server %q", host)
+		}
+	}
+}
+
+func TestClashSkipsProxyGroups(t *testing.T) {
+	body := []byte(`
+proxies:
+  - name: auto
+    type: url-test
+    server: 127.0.0.1
+    port: 9090
+  - name: real
+    type: vless
+    server: 1.2.3.4
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+`)
+	res := Clash(body, "test")
+	if len(res.Nodes) != 1 || res.Nodes[0].Name != "real" {
+		t.Fatalf("parsed %+v, want only the real node", res.Nodes)
+	}
+	if len(res.Skips) != 1 || !strings.Contains(res.Skips[0].Reason, "proxy group") {
+		t.Fatalf("skips = %+v, want one explicit proxy-group skip", res.Skips)
 	}
 }
