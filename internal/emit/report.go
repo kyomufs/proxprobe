@@ -12,6 +12,8 @@ type Report struct {
 	Started  time.Time
 	Duration time.Duration
 	Checks   string
+	// Dedupe — правило, по которому схлопывались дубликаты между подписками.
+	Dedupe string
 	// HostTUN — на машине включён TUN-клиент: замеры идут через него.
 	HostTUN    bool
 	Sources    []ReportSource
@@ -65,6 +67,7 @@ func RenderReport(r Report) []byte {
 		fmt.Fprintf(&b, "duration %s\n", r.Duration.Round(time.Millisecond))
 	}
 	fmt.Fprintf(&b, "checks %s\n", r.Checks)
+	fmt.Fprintf(&b, "dedupe %s\n", r.Dedupe)
 	if r.HostTUN {
 		b.WriteString("host-tun yes: на машине TUN-клиент, замеры идут через него\n")
 	}

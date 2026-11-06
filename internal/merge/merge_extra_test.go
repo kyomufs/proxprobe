@@ -11,7 +11,7 @@ func TestMergeCountsByProtoExtra(t *testing.T) {
 	trojan := model.Node{Proto: model.ProtoTrojan, Server: "b.com", Port: 443, Password: "p", Source: []string{"s"}}
 	trojan.Finalize()
 
-	_, report := Merge([][]model.Node{{vless, trojan}})
+	_, report := Merge([][]model.Node{{vless, trojan}}, ModeStrict)
 
 	if report.ByProto[model.ProtoVLESS] != 1 || report.ByProto[model.ProtoTrojan] != 1 {
 		t.Errorf("ByProto = %v, want one vless and one trojan", report.ByProto)
@@ -19,7 +19,7 @@ func TestMergeCountsByProtoExtra(t *testing.T) {
 }
 
 func TestMergeEmptyInputExtra(t *testing.T) {
-	nodes, report := Merge(nil)
+	nodes, report := Merge(nil, ModeStrict)
 	if len(nodes) != 0 || report.Input != 0 {
 		t.Errorf("empty input produced %d nodes and report %+v", len(nodes), report)
 	}

@@ -36,6 +36,7 @@ const usage = `proxprobe — собирает подписку из sources.yaml
   --config PATH   sources.yaml (по умолчанию $XDG_CONFIG_HOME/proxprobe/sources.yaml)
   --out DIR       каталог для sub.yaml и report.txt (по умолчанию $XDG_DATA_HOME/proxprobe)
   --check LIST    проверки через запятую: none, tcp, http (по умолчанию tcp,http)
+  --dedupe MODE   что считать дубликатом: strict, host, none (по умолчанию strict)
   --core NAME     бинарь ядра mihomo (по умолчанию mihomo)
   --jobs N        сколько узлов HTTP-проверка проверяет одновременно (по умолчанию 16)
   --dump-raw DIR  сохранить исходные тела подписок в DIR
@@ -51,6 +52,7 @@ type options struct {
 	config  string
 	out     string
 	check   string
+	dedupe  string
 	core    string
 	jobs    int
 	dumpRaw string
@@ -107,6 +109,7 @@ func parseArgs(args []string) (options, error) {
 	fs.StringVar(&opts.config, "config", defaultConfigPath(), "path to sources.yaml")
 	fs.StringVar(&opts.out, "out", defaultDataDir(), "output directory")
 	fs.StringVar(&opts.check, "check", "tcp,http", "checks: none, tcp, http")
+	fs.StringVar(&opts.dedupe, "dedupe", string(merge.ModeStrict), "duplicate rule: strict, host, none")
 	fs.StringVar(&opts.core, "core", "mihomo", "core binary name")
 	fs.IntVar(&opts.jobs, "jobs", probe.HTTPJobs, "HTTP check concurrency")
 	fs.StringVar(&opts.dumpRaw, "dump-raw", "", "save raw source bodies to this directory")
@@ -116,6 +119,9 @@ func parseArgs(args []string) (options, error) {
 	}
 	if fs.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	if _, err := merge.ParseMode(opts.dedupe); err != nil {
+		return options{}, err
 	}
 	return opts, nil
 }
@@ -182,7 +188,12 @@ func execute(ctx context.Context, opts options, report *emit.Report) (int, error
 		return 1, errors.New("all sources failed")
 	}
 
-	nodes, merged := merge.Merge(groups)
+	mode, err := merge.ParseMode(opts.dedupe)
+	if err != nil {
+		return 2, err
+	}
+	nodes, merged := merge.Merge(groups, mode)
+	report.Dedupe = string(mode)
 	report.Unique = merged.Unique
 	report.Duplicates = merged.Duplicate
 	if len(nodes) == 0 {
