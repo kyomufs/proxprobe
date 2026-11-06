@@ -7,8 +7,10 @@ package sources
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -19,10 +21,18 @@ import (
 // UA нужен источникам, которые выбирают формат по клиенту: pro1link отдаёт
 // Clash для clash-клиента и base64-список для v2rayNG. Пустое значение —
 // DefaultUA из internal/fetch.
+//
+// Headers — заголовки, без которых источник отдаёт заглушку вместо узлов:
+// панели с привязкой к устройству требуют что-то вроде x-hwid и без него
+// возвращают два рекламных узла на 0.0.0.0:1. UA из поля выше применяется
+// последним, чтобы не спорить с ua.
 type Source struct {
-	URL      string `yaml:"url"`
-	UA       string `yaml:"ua,omitempty"`
-	Insecure bool   `yaml:"insecure,omitempty"`
+	// ID — имя источника в отчёте и дампе. Пусто — берётся хост.
+	ID       string            `yaml:"id,omitempty"`
+	URL      string            `yaml:"url"`
+	UA       string            `yaml:"ua,omitempty"`
+	Insecure bool              `yaml:"insecure,omitempty"`
+	Headers  map[string]string `yaml:"headers,omitempty"`
 }
 
 // File — корень sources.yaml.
@@ -31,6 +41,10 @@ type File struct {
 }
 
 // Load читает и проверяет sources.yaml.
+//
+// Разбор строгий: неизвестное поле — ошибка, а не тихо проигнорированная
+// настройка. Конфиг с опечаткой в имени поля выглядел рабочим и молча
+// отдавал заглушку вместо узлов.
 //
 // Повторяющийся URL схлопывается: две записи с одним адресом — это одна и
 // та же подписка, и качать её дважды незачем.
@@ -41,7 +55,9 @@ func Load(path string) ([]Source, error) {
 	}
 
 	var file File
-	if err := yaml.Unmarshal(body, &file); err != nil {
+	dec := yaml.NewDecoder(strings.NewReader(string(body)))
+	dec.KnownFields(true)
+	if err := dec.Decode(&file); err != nil {
 		return nil, fmt.Errorf("sources: %s is not valid YAML: %w", path, err)
 	}
 	if len(file.Sources) == 0 {
@@ -59,6 +75,11 @@ func Load(path string) ([]Source, error) {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return nil, fmt.Errorf("sources: entry %d has unusable url %q", i+1, raw)
 		}
+		for name := range s.Headers {
+			if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " :\t\r\n") {
+				return nil, fmt.Errorf("sources: entry %d has invalid header name %q", i+1, name)
+			}
+		}
 		key := u.String()
 		if seen[key] {
 			continue
@@ -70,11 +91,30 @@ func Load(path string) ([]Source, error) {
 	return out, nil
 }
 
-// Name — короткое имя источника для отчёта и дампа: хост без www.
+// Name — короткое имя источника для отчёта и дампа: id, а если его нет —
+// хост без www.
 func (s Source) Name() string {
+	if id := strings.TrimSpace(s.ID); id != "" {
+		return id
+	}
 	u, err := url.Parse(s.URL)
 	if err != nil || u.Hostname() == "" {
 		return "source"
 	}
 	return strings.TrimPrefix(u.Hostname(), "www.")
+}
+
+// HeaderList возвращает заголовки в стабильном порядке: одинаковый запрос
+// между прогонами проще сравнивать в логах.
+func (s Source) HeaderList() [][2]string {
+	names := make([]string, 0, len(s.Headers))
+	for name := range s.Headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([][2]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, [2]string{http.CanonicalHeaderKey(name), s.Headers[name]})
+	}
+	return out
 }

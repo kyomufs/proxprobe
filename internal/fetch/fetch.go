@@ -121,12 +121,19 @@ func fetchOnce(ctx context.Context, client *http.Client, src sources.Source) ([]
 	if err != nil {
 		return nil, err
 	}
+	// Заголовки из конфига идут первыми: панели с привязкой к устройству
+	// отдают узлы только при своём x-hwid, а без него — заглушку 0.0.0.0:1.
+	for _, h := range src.HeaderList() {
+		req.Header.Set(h[0], h[1])
+	}
 	ua := strings.TrimSpace(src.UA)
 	if ua == "" {
 		ua = DefaultUA
 	}
 	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Accept", "*/*")
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "*/*")
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
