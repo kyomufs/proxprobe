@@ -266,6 +266,19 @@ func execute(ctx context.Context, opts options, report *emit.Report) (int, error
 			return 2, fmt.Errorf("cannot write %s: %w", corePath, err)
 		}
 		fmt.Printf("%s: %d nodes + DIRECT\n", corePath, len(nodes))
+
+		// Манифест пишется рядом с профилем ядра и описывает именно его:
+		// имена в нём — те, что ядро видит после уникализации. Клиентский
+		// sub.yaml резервирует другие имена, поэтому манифест для него не
+		// выпускается: два манифеста с разными именами только путали бы.
+		manifest, err := emit.RenderManifest(nodes)
+		if err != nil {
+			return 2, err
+		}
+		manifestPath := filepath.Join(opts.mihomo, emit.ManifestFile)
+		if err := writeAtomic(manifestPath, manifest); err != nil {
+			return 2, fmt.Errorf("cannot write %s: %w", manifestPath, err)
+		}
 	}
 
 	body, err := emit.Subscription(nodes)

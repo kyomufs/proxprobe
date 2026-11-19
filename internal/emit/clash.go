@@ -91,13 +91,35 @@ func Subscription(nodes []model.Node) ([]byte, error) {
 // Имена уникализируются: ядро отвергает весь конфиг, если два прокси названы
 // одинаково, а в публичных подписках повтор названий — норма.
 func buildProxies(nodes []model.Node, reserved ...string) ([]map[string]any, []string) {
+	built := buildNamedProxies(nodes, reserved...)
+
+	proxies := make([]map[string]any, 0, len(built))
+	names := make([]string, 0, len(built))
+	for _, b := range built {
+		proxies = append(proxies, b.proxy)
+		names = append(names, b.name)
+	}
+	return proxies, names
+}
+
+// builtProxy — запись профиля вместе с узлом, из которого она собрана, и
+// итоговым именем.
+//
+// Манифест собирается этим же проходом: имя в манифесте обязано совпадать с
+// именем в профиле, иначе панель не найдёт узел, который видит ядро.
+type builtProxy struct {
+	proxy map[string]any
+	name  string
+	node  model.Node
+}
+
+func buildNamedProxies(nodes []model.Node, reserved ...string) []builtProxy {
 	used := make(map[string]int, len(reserved)+len(nodes))
 	for _, name := range reserved {
 		used[name] = 1
 	}
 
-	proxies := make([]map[string]any, 0, len(nodes))
-	names := make([]string, 0, len(nodes))
+	built := make([]builtProxy, 0, len(nodes))
 	for _, n := range nodes {
 		proxy, err := proxyForClash(n)
 		if err != nil {
@@ -105,10 +127,9 @@ func buildProxies(nodes []model.Node, reserved ...string) ([]map[string]any, []s
 		}
 		name := uniqueName(n.Name, used)
 		proxy["name"] = name
-		proxies = append(proxies, proxy)
-		names = append(names, name)
+		built = append(built, builtProxy{proxy: proxy, name: name, node: n})
 	}
-	return proxies, names
+	return built
 }
 
 // proxyForClash собирает запись прокси для Clash.
