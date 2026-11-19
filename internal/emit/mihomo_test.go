@@ -8,8 +8,8 @@ import (
 	"github.com/kyomufs/proxprobe/internal/model"
 )
 
-// mihomoProfile — то, что должно оказаться в файле ядра.
-type mihomoProfile struct {
+// mihomoDocShape — то, что должно оказаться в файле ядра.
+type mihomoDocShape struct {
 	MixedPort          int    `yaml:"mixed-port"`
 	BindAddress        string `yaml:"bind-address"`
 	ExternalController string `yaml:"external-controller"`
@@ -25,9 +25,9 @@ type mihomoProfile struct {
 	Rules []string `yaml:"rules"`
 }
 
-func parseMihomo(t *testing.T, body []byte) mihomoProfile {
+func parseMihomo(t *testing.T, body []byte) mihomoDocShape {
 	t.Helper()
-	var doc mihomoProfile
+	var doc mihomoDocShape
 	if err := yaml.Unmarshal(body, &doc); err != nil {
 		t.Fatalf("generated core profile does not parse: %v", err)
 	}
@@ -139,5 +139,30 @@ func TestMihomoWithoutNodesKeepsTheGroupUsable(t *testing.T) {
 	}
 	if len(doc.Groups) != 1 || len(doc.Groups[0].Proxies) != 1 || doc.Groups[0].Proxies[0] != "DIRECT" {
 		t.Fatalf("group = %+v, want a single DIRECT member", doc.Groups)
+	}
+}
+
+// TestMihomoForgetsTheSelectedNodeBetweenRuns — подписка обновляется целиком, и
+// выбранный вчера узел сегодня может отсутствовать. Ядро, помнящее выбор,
+// поднимется с мёртвым узлом и остановит весь путь; поэтому выбор не
+// сохраняется, а запуск начинается с первого члена группы.
+func TestMihomoForgetsTheSelectedNodeBetweenRuns(t *testing.T) {
+	body, err := Mihomo([]model.Node{sampleNode("NL 1", "first.example.com")})
+	if err != nil {
+		t.Fatalf("Mihomo returned error: %v", err)
+	}
+	var raw struct {
+		Profile struct {
+			StoreSelected *bool `yaml:"store-selected"`
+		} `yaml:"profile"`
+	}
+	if err := yaml.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("generated core profile does not parse: %v", err)
+	}
+	if raw.Profile.StoreSelected == nil {
+		t.Fatal("profile.store-selected is not written: the core would remember a node that the next refresh removes")
+	}
+	if *raw.Profile.StoreSelected {
+		t.Fatal("profile.store-selected is true: the core would restore a stale node")
 	}
 }

@@ -23,6 +23,18 @@ const (
 	MihomoGroup = "egress"
 )
 
+// mihomoProfile — что ядро помнит между запусками.
+//
+// Выбранный узел не сохраняется: подписка обновляется целиком, и узел,
+// выбранный вчера, сегодня может уже не существовать — ядро восстановит его
+// из кеша, и весь путь встанет, хотя группа полна живых. Измерено: после
+// ночного обновления группа поднялась с узлом, которого в профиле больше нет,
+// и каждый запрос умирал на «connect error: context deadline exceeded».
+// Первый член группы (DIRECT) и есть дом, с которого начинается запуск.
+type mihomoProfile struct {
+	StoreSelected bool `yaml:"store-selected"`
+}
+
 // mihomoDoc — профиль для собственного ядра.
 //
 // Порт и контроллер здесь есть намеренно, в отличие от подписки: этот файл
@@ -34,6 +46,7 @@ type mihomoDoc struct {
 	ExternalController string           `yaml:"external-controller"`
 	Mode               string           `yaml:"mode"`
 	LogLevel           string           `yaml:"log-level"`
+	Profile            mihomoProfile    `yaml:"profile"`
 	Proxies            []map[string]any `yaml:"proxies"`
 	ProxyGroups        []map[string]any `yaml:"proxy-groups"`
 	Rules              []string         `yaml:"rules"`
@@ -58,6 +71,7 @@ func Mihomo(nodes []model.Node) ([]byte, error) {
 		ExternalController: MihomoController,
 		Mode:               "rule",
 		LogLevel:           "warning",
+		Profile:            mihomoProfile{StoreSelected: false},
 		Proxies:            proxies,
 		ProxyGroups: []map[string]any{{
 			"name":    MihomoGroup,
