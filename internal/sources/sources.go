@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,8 +29,17 @@ import (
 // последним, чтобы не спорить с ua.
 type Source struct {
 	// ID — имя источника в отчёте и дампе. Пусто — берётся хост.
-	ID       string            `yaml:"id,omitempty"`
-	URL      string            `yaml:"url"`
+	ID string `yaml:"id,omitempty"`
+
+	// URL и Path взаимоисключающие: подписка либо скачивается, либо читается
+	// с диска. Локальный путь нужен, когда адрес подписки уже мёртв, а её
+	// последняя выгрузка лежит в кеше клиента: перекачать нечего, а разобрать
+	// и проверить узлы по-прежнему надо.
+	URL  string `yaml:"url,omitempty"`
+	Path string `yaml:"path,omitempty"`
+
+	// UA, Insecure и Headers относятся только к скачиванию: у файла нет ни
+	// сервера, ни заголовков запроса.
 	UA       string            `yaml:"ua,omitempty"`
 	Insecure bool              `yaml:"insecure,omitempty"`
 	Headers  map[string]string `yaml:"headers,omitempty"`
@@ -67,9 +77,42 @@ func Load(path string) ([]Source, error) {
 	seen := map[string]bool{}
 	out := make([]Source, 0, len(file.Sources))
 	for i, s := range file.Sources {
+		if p := strings.TrimSpace(s.Path); p != "" {
+			if strings.TrimSpace(s.URL) != "" {
+				return nil, fmt.Errorf("sources: entry %d has both url and path", i+1)
+			}
+			// Скачивание и файл — разные вещи: поля запроса к файлу не
+			// применимы, и принять их молча значит оставить в конфиге
+			// настройку, которая ничего не делает.
+			if s.UA != "" || s.Insecure || len(s.Headers) > 0 {
+				return nil, fmt.Errorf("sources: entry %d is a local file; ua, headers and insecure do not apply", i+1)
+			}
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return nil, fmt.Errorf("sources: entry %d path %q: %w", i+1, p, err)
+			}
+			// Существование проверяется при чтении конфига: источник, которого
+			// нет, — это опечатка в пути, а не временная сетевая ошибка.
+			info, err := os.Stat(abs)
+			if err != nil {
+				return nil, fmt.Errorf("sources: entry %d path %q: %w", i+1, abs, err)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("sources: entry %d path %q is not a regular file", i+1, abs)
+			}
+			key := "file:" + abs
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			s.Path = abs
+			out = append(out, s)
+			continue
+		}
+
 		raw := strings.TrimSpace(s.URL)
 		if raw == "" {
-			return nil, fmt.Errorf("sources: entry %d has no url", i+1)
+			return nil, fmt.Errorf("sources: entry %d has neither url nor path", i+1)
 		}
 		u, err := url.Parse(raw)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -92,10 +135,17 @@ func Load(path string) ([]Source, error) {
 }
 
 // Name — короткое имя источника для отчёта и дампа: id, а если его нет —
-// хост без www.
+// хост без www, а у файла — имя файла без каталога и расширения.
 func (s Source) Name() string {
 	if id := strings.TrimSpace(s.ID); id != "" {
 		return id
+	}
+	if p := strings.TrimSpace(s.Path); p != "" {
+		base := filepath.Base(p)
+		if ext := filepath.Ext(base); ext != "" {
+			base = strings.TrimSuffix(base, ext)
+		}
+		return base
 	}
 	u, err := url.Parse(s.URL)
 	if err != nil || u.Hostname() == "" {

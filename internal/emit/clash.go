@@ -28,6 +28,9 @@ const testURL = "https://www.gstatic.com/generate_204"
 const (
 	ProxyGroupName = "PROXY"
 	AutoGroupName  = "AUTO"
+	// directName — встроенный выход ядра. Узел подписки с таким именем
+	// перекрыл бы его, и «напрямую» перестало бы существовать.
+	directName = "DIRECT"
 )
 
 // clashDoc — итоговый профиль.
@@ -45,30 +48,10 @@ type clashDoc struct {
 // Порядок узлов сохраняется: main сортирует живые по задержке, и клиент
 // видит их в том же порядке.
 func Subscription(nodes []model.Node) ([]byte, error) {
+	proxies, names := buildProxies(nodes, ProxyGroupName, AutoGroupName, directName)
 	doc := clashDoc{
-		Proxies: make([]map[string]any, 0, len(nodes)),
+		Proxies: proxies,
 		Rules:   []string{"MATCH," + ProxyGroupName},
-	}
-
-	// Имена групп занимаются ДО узлов: у mihomo прокси и группа лежат в
-	// одном словаре, и узел, названный PROXY, делает конфиг циклом
-	// ("loop is detected in ProxyGroup"). Тогда клиент не грузит профиль
-	// целиком.
-	used := map[string]int{ProxyGroupName: 1, AutoGroupName: 1}
-	names := make([]string, 0, len(nodes))
-
-	for _, n := range nodes {
-		proxy, err := proxyForClash(n)
-		if err != nil {
-			continue
-		}
-		// Имена уникализируются: ядро отвергает весь конфиг, если два
-		// прокси названы одинаково, а в публичных подписках повтор названий
-		// — норма.
-		name := uniqueName(n.Name, used)
-		proxy["name"] = name
-		doc.Proxies = append(doc.Proxies, proxy)
-		names = append(names, name)
 	}
 
 	if len(names) == 0 {
@@ -77,7 +60,7 @@ func Subscription(nodes []model.Node) ([]byte, error) {
 		doc.ProxyGroups = []map[string]any{{
 			"name":    ProxyGroupName,
 			"type":    "select",
-			"proxies": []string{"DIRECT"},
+			"proxies": []string{directName},
 		}}
 		return marshalYAML(doc)
 	}
@@ -95,6 +78,37 @@ func Subscription(nodes []model.Node) ([]byte, error) {
 		},
 	}
 	return marshalYAML(doc)
+}
+
+// buildProxies превращает узлы в записи профиля вместе с их итоговыми именами.
+//
+// reserved — имена, которые профиль занимает сам: группы и встроенный выход.
+// Они занимаются ДО узлов, потому что у mihomo прокси и группа лежат в одном
+// словаре: узел, названный как группа, делает конфиг циклом ("loop is
+// detected in ProxyGroup"), а узел по имени DIRECT отменяет прямой выход.
+// Тогда клиент не грузит профиль целиком.
+//
+// Имена уникализируются: ядро отвергает весь конфиг, если два прокси названы
+// одинаково, а в публичных подписках повтор названий — норма.
+func buildProxies(nodes []model.Node, reserved ...string) ([]map[string]any, []string) {
+	used := make(map[string]int, len(reserved)+len(nodes))
+	for _, name := range reserved {
+		used[name] = 1
+	}
+
+	proxies := make([]map[string]any, 0, len(nodes))
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		proxy, err := proxyForClash(n)
+		if err != nil {
+			continue
+		}
+		name := uniqueName(n.Name, used)
+		proxy["name"] = name
+		proxies = append(proxies, proxy)
+		names = append(names, name)
+	}
+	return proxies, names
 }
 
 // proxyForClash собирает запись прокси для Clash.

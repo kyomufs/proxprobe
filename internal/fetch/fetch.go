@@ -85,8 +85,13 @@ func All(ctx context.Context, list []sources.Source, opts Options) []Result {
 	return out
 }
 
-// one скачивает источник с повторами.
+// one читает локальный файл или скачивает источник с повторами.
 func one(ctx context.Context, src sources.Source, opts Options) ([]byte, error) {
+	// Локальный файл не повторяется: ошибка чтения — это путь или права, и
+	// вторая попытка даст тот же ответ.
+	if src.Path != "" {
+		return readLocal(src.Path)
+	}
 	client := &http.Client{
 		Timeout: opts.Timeout,
 		Transport: &http.Transport{
@@ -152,6 +157,28 @@ func fetchOnce(ctx context.Context, client *http.Client, src sources.Source) ([]
 	}
 	if len(body) > maxBody {
 		return nil, fmt.Errorf("response is larger than %d MiB", maxBody>>20)
+	}
+	return body, nil
+}
+
+// readLocal читает подписку, уже лежащую на диске.
+//
+// Размер проверяется по тому же пределу, что и у скачанного тела: файл на
+// гигабайт — это не подписка, и читать его целиком в память незачем.
+func readLocal(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxBody {
+		return nil, fmt.Errorf("%s is larger than %d MiB", path, maxBody>>20)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("%s is larger than %d MiB", path, maxBody>>20)
 	}
 	return body, nil
 }

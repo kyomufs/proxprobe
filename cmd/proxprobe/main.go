@@ -40,6 +40,7 @@ const usage = `proxprobe — собирает подписку из sources.yaml
   --core NAME     бинарь ядра mihomo (по умолчанию mihomo)
   --jobs N        сколько узлов HTTP-проверка проверяет одновременно (по умолчанию 16)
   --dump-raw DIR  сохранить исходные тела подписок в DIR
+  --mihomo DIR    записать профиль для собственного ядра в DIR/config.yaml
   --version       напечатать версию
 
 Коды возврата:
@@ -56,6 +57,7 @@ type options struct {
 	core    string
 	jobs    int
 	dumpRaw string
+	mihomo  string
 	version bool
 }
 
@@ -113,6 +115,7 @@ func parseArgs(args []string) (options, error) {
 	fs.StringVar(&opts.core, "core", "mihomo", "core binary name")
 	fs.IntVar(&opts.jobs, "jobs", probe.HTTPJobs, "HTTP check concurrency")
 	fs.StringVar(&opts.dumpRaw, "dump-raw", "", "save raw source bodies to this directory")
+	fs.StringVar(&opts.mihomo, "mihomo", "", "write a core profile (config.yaml) to this directory")
 	fs.BoolVar(&opts.version, "version", false, "print version")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
@@ -248,6 +251,21 @@ func execute(ctx context.Context, opts options, report *emit.Report) (int, error
 		// Прошлый профиль не перезаписывается: пустой sub.yaml в клиенте
 		// выглядит как поломка, а старый рабочий набор лучше нуля.
 		return 1, fmt.Errorf("no nodes passed checks (%s); %s left untouched", opts.check, emit.SubFile)
+	}
+
+	// Профиль ядра пишется ПЕРВЫМ: если он не собрался, клиентский sub.yaml
+	// тоже остаётся прошлым. Иначе получилось бы, что клиент обновился, а
+	// ядро, через которое он ходит, — нет.
+	if opts.mihomo != "" {
+		core, err := emit.Mihomo(nodes)
+		if err != nil {
+			return 2, err
+		}
+		corePath := filepath.Join(opts.mihomo, emit.MihomoFile)
+		if err := writeAtomic(corePath, core); err != nil {
+			return 2, fmt.Errorf("cannot write %s: %w", corePath, err)
+		}
+		fmt.Printf("%s: %d nodes + DIRECT\n", corePath, len(nodes))
 	}
 
 	body, err := emit.Subscription(nodes)
